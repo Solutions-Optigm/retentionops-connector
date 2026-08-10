@@ -1,0 +1,161 @@
+{
+  "$id": "https://schemas.optigm.ca/retentionops/connector/v1/result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobResult",
+  "description": "What a connector is allowed to send back. Compute near the data, return evidence — not data. There is deliberately no member anywhere in this schema that can hold a row, a column value, a key or a credential: the shape itself is the control, so a future bug cannot widen it without failing validation on both sides.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "job_id",
+    "organization_id",
+    "connector_id",
+    "data_source_id",
+    "operation",
+    "status",
+    "started_at",
+    "completed_at",
+    "connector_version",
+    "result_digest",
+    "signature"
+  ],
+  "properties": {
+    "protocol_version": { "const": "1" },
+    "job_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "connector_id": { "$ref": "#/$defs/uuid" },
+    "data_source_id": { "$ref": "#/$defs/uuid" },
+    "operation": {
+      "type": "string",
+      "enum": [
+        "POSTGRES_TEST_CONNECTION",
+        "POSTGRES_DISCOVER",
+        "POSTGRES_COUNT",
+        "POSTGRES_DELETE"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["COMPLETED", "DENIED", "FAILED", "PLAN_STALE", "PARTIAL", "CANCELLED"],
+      "description": "PARTIAL is a success, not an error: a batched delete that hit its time or row ceiling committed everything it reported and stopped on a boundary. CANCELLED means a signed CANCEL control was observed at a checkpoint; its statistics cover prior committed batches."
+    },
+    "denial_code": {
+      "type": "string",
+      "description": "Stable, never translated. Present exactly when status is DENIED, so an operator can tell a policy refusal from an outage without reading prose.",
+      "enum": [
+        "DENIED_BY_LOCAL_POLICY",
+        "DENIED_UNKNOWN_DATA_SOURCE",
+        "DENIED_UNKNOWN_OPERATION",
+        "DENIED_TARGET_NOT_ALLOWED",
+        "DENIED_COLUMN_NOT_ALLOWED",
+        "DENIED_ROW_LIMIT_EXCEEDED",
+        "DENIED_BATCH_LIMIT_EXCEEDED",
+        "DENIED_APPROVAL_REQUIRED",
+        "DENIED_APPROVAL_EXPIRED",
+        "DENIED_SIGNATURE_INVALID",
+        "DENIED_JOB_EXPIRED",
+        "DENIED_NONCE_REPLAYED",
+        "DENIED_WRONG_CONNECTOR",
+        "DENIED_WRONG_ORGANIZATION",
+        "DENIED_PROTOCOL_VERSION"
+      ]
+    },
+    "failure_code": {
+      "type": "string",
+      "description": "Stable operational failure class. Never carries a driver message, which could quote a row.",
+      "enum": [
+        "SOURCE_UNREACHABLE",
+        "TLS_VERIFICATION_FAILED",
+        "AUTHENTICATION_FAILED",
+        "SECRET_UNAVAILABLE",
+        "PERMISSION_DENIED",
+        "STATEMENT_TIMEOUT",
+        "LOCK_TIMEOUT",
+        "TARGET_CHANGED",
+        "INTERNAL_ERROR"
+      ]
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "connector_version": { "type": "string", "maxLength": 64 },
+    "plan_digest": { "$ref": "#/$defs/digest" },
+    "approval_id": { "$ref": "#/$defs/uuid" },
+    "policy_digest": {
+      "$ref": "#/$defs/digest",
+      "description": "Digest of the local safety policy that authorized this job, so an audit can prove which ceilings were in force at the time."
+    },
+    "statistics": { "$ref": "#/$defs/statistics" },
+    "result_digest": {
+      "$ref": "#/$defs/digest",
+      "description": "RFC 8785 canonical digest of this document with result_digest and signature removed."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^ed25519:[A-Za-z0-9+/]{86}==$",
+      "description": "Ed25519 by the connector's own enrolled key over 'RetentionOps-Evidence-v1\\n' + result_digest. The control plane can prove which connector produced the record, and cannot forge one."
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "statistics": {
+      "type": "object",
+      "description": "Aggregates and metadata only. Every member is a count, a byte size, a boundary timestamp, a schema name or a server version.",
+      "additionalProperties": false,
+      "properties": {
+        "candidate_rows": { "type": "integer", "minimum": 0 },
+        "resource_rows": { "type": "integer", "minimum": 0 },
+        "blocked_hold_rows": { "type": "integer", "minimum": 0 },
+        "estimated_bytes": { "type": "integer", "minimum": 0 },
+        "oldest": { "type": "string", "format": "date-time" },
+        "newest": { "type": "string", "format": "date-time" },
+        "rows_deleted": { "type": "integer", "minimum": 0 },
+        "batches": { "type": "integer", "minimum": 0 },
+        "errors": { "type": "integer", "minimum": 0 },
+        "observed_rows": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Recount taken immediately before execution. Compared with the plan's expected_rows to detect drift."
+        },
+        "database_version": { "type": "string", "maxLength": 64 },
+        "tls_mode": { "type": "string", "enum": ["verify-full", "verify-ca", "require"] },
+        "reader_validated": { "type": "boolean" },
+        "executor_validated": { "type": "boolean" },
+        "tables": {
+          "type": "array",
+          "maxItems": 5000,
+          "items": { "$ref": "#/$defs/table" }
+        }
+      }
+    },
+    "table": {
+      "type": "object",
+      "description": "Structure, never content.",
+      "additionalProperties": false,
+      "required": ["schema", "table", "columns"],
+      "properties": {
+        "schema": { "type": "string", "maxLength": 63 },
+        "table": { "type": "string", "maxLength": 63 },
+        "estimated_rows": { "type": "integer", "minimum": 0 },
+        "columns": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "type"],
+            "properties": {
+              "name": { "type": "string", "maxLength": 63 },
+              "type": { "type": "string", "maxLength": 64 },
+              "nullable": { "type": "boolean" },
+              "primary_key": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

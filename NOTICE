@@ -1,0 +1,34 @@
+RetentionOps Connector
+Copyright 2026 Solutions Optigm inc.
+
+This product is licensed under the Apache License, Version 2.0. See LICENSE.
+
+WHAT THIS COMPONENT IS
+
+The RetentionOps Connector is the data-plane half of RetentionOps. It runs inside a
+customer's own network, holds their database credentials, and is the only component
+that ever connects to their databases. It is open source so that the people who have to
+approve installing it can read exactly what it can and cannot do.
+
+The RetentionOps control plane — planner, policy engine, scheduler, approvals, tenancy,
+identity, entitlements, billing, evidence service and web console — is a separate,
+proprietary product of Solutions Optigm inc. It is not part of this repository, is not
+covered by this licence, and is not required in order to read, build, audit, modify or
+run this connector.
+
+TRADEMARKS
+
+The Apache License grants no trademark rights. "RetentionOps", "Solutions Optigm" and
+the associated names and logos are trademarks of Solutions Optigm inc. See TRADEMARKS.md
+for what that means for forks and redistributions.
+
+THIRD-PARTY SOFTWARE
+
+This product depends on separately distributed third-party software that remains
+governed by its own licence:
+
+  github.com/jackc/pgx/v5   PostgreSQL driver            MIT
+  gopkg.in/yaml.v3          YAML parser                  MIT and Apache-2.0
+
+Transitive dependencies and their licences are enumerated in the CycloneDX inventory
+published with every release, and reproducible with `make sbom`.

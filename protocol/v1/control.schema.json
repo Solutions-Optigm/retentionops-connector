@@ -1,0 +1,38 @@
+{
+  "$id": "https://schemas.optigm.ca/retentionops/connector/v1/control.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionControl",
+  "description": "A signed, short-lived checkpoint decision. It can stop or resume future batches but can never rewrite the immutable approved JobEnvelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "job_id",
+    "organization_id",
+    "connector_id",
+    "action",
+    "execution_version",
+    "issued_at",
+    "expires_at",
+    "request_nonce",
+    "signature"
+  ],
+  "properties": {
+    "protocol_version": { "const": "1" },
+    "job_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "connector_id": { "$ref": "#/$defs/uuid" },
+    "action": { "type": "string", "enum": ["RUN", "PAUSE", "CANCEL"] },
+    "execution_version": { "type": "integer", "minimum": 1 },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "request_nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{22,64}$" },
+    "signature": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9+/]{86}==$" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: Verify the module graph is committed and unchanged
+        run: |
+          go mod download
+          go mod verify
+          git diff --exit-code go.mod go.sum
+      - name: Format, vet, test
+        run: make check
+      - name: Build every release platform
+        run: make dist
+
+  # The whole value proposition of this component is that a reader can enumerate what it can do.
+  # These greps fail the build if that stops being true, so the claim cannot rot silently.
+  containment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: No shell, process or filesystem execution anywhere
+        run: |
+          ! grep -rn --include='*.go' -E 'os/exec|syscall\.Exec|plugin\.Open' . \
+            || (echo "this component must never execute anything" && exit 1)
+      - name: SQL lives only in the PostgreSQL adapter
+        run: |
+          offenders=$(grep -rln --include='*.go' -iE '\b(SELECT|DELETE FROM|INSERT INTO|UPDATE) ' . \
+            | grep -v '^./adapters/postgres/' || true)
+          test -z "$offenders" || (echo "SQL outside adapters/postgres: $offenders" && exit 1)
+      - name: The operation set has not grown without a schema change
+        run: |
+          declared=$(grep -c '"POSTGRES_' protocol/v1/job.schema.json)
+          test "$declared" -eq 4 \
+            || (echo "the operation enum changed; this needs an ADR and a security review" && exit 1)
+
+  vulnerabilities:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed
+        with:
+          go-version: "1.25"
+          cache: true
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          govulncheck ./...

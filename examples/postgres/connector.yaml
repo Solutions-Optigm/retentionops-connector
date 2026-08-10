@@ -1,0 +1,103 @@
+# RetentionOps Connector — example configuration
+#
+# Copy to /etc/retentionops/connector.yaml and edit. Every field is documented in
+# docs/configuration.md. Validate before deploying:
+#
+#   retentionops-connector validate-config --config /etc/retentionops/connector.yaml
+
+control_plane:
+  url: https://connector.retentionops.ca
+  poll_wait_seconds: 30
+  heartbeat_seconds: 30
+
+identity:
+  # Must be mode 0700. The private key lives here and never leaves this host.
+  directory: /var/lib/retentionops/identity
+
+state:
+  # Replay ledger. Losing it means a captured job could be accepted a second time
+  # within its expiry window, so put it on a persistent volume.
+  directory: /var/lib/retentionops/state
+
+telemetry:
+  # Loopback: nothing outside this host has any business scraping the connector.
+  metrics_address: 127.0.0.1:9102
+  log_format: json
+  log_level: info
+
+sources:
+  # The key is the data source UUID the RetentionOps console issued. Copy it exactly.
+  4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52:
+    type: postgresql
+    host: db.production.internal
+    port: 5432
+    database: production
+
+    tls:
+      # verify-full checks the chain AND the hostname. `require` proves only that the
+      # session is encrypted, which means anything answering on 5432 is accepted.
+      mode: verify-full
+      ca_file: /etc/retentionops/certs/postgres-ca.pem
+
+    # Two identities, used on different code paths. The executor secret is resolved only
+    # on the destructive path, after the local policy and the approval have both passed —
+    # so a flaw in planning cannot yield the credential that can delete.
+    reader:
+      username: retentionops_reader
+      password:
+        provider: aws-secrets-manager
+        ref: prod/retentionops/postgres-reader#password
+
+    executor:
+      username: retentionops_executor
+      password:
+        provider: aws-secrets-manager
+        ref: prod/retentionops/postgres-executor#password
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Everything below is yours. There is no RetentionOps message that can read this
+    # block or change it. Its digest travels in the heartbeat so the console can show
+    # which policy was in force — a change there is always someone editing this file.
+    # ─────────────────────────────────────────────────────────────────────────────
+    safety:
+      allowed_schemas:
+        - application
+
+      # Refuse any destructive job with no valid human approval, independently of what
+      # the control plane believes it has.
+      require_approval: true
+
+      # Production default: exact below 1,000 planned rows; above that, both 0.5%
+      # (50 basis points) and 100 rows apply. The control plane may tighten this,
+      # never widen it. Use mode: strict with no other fields for exact recounts.
+      drift:
+        mode: bounded
+        exact_match_below_rows: 1000
+        max_basis_points: 50
+        max_rows: 100
+
+      # Source-wide ceilings. The tighter of source and table applies.
+      max_delete_rows: 50000
+      max_batch_size: 1000
+
+      # Upper bounds. A job asking for more is lowered to these, not refused: a shorter
+      # timeout can only make a job give up earlier.
+      statement_timeout_seconds: 30
+      lock_timeout_seconds: 5
+      max_duration_seconds: 1800
+
+      tables:
+        - schema: application
+          table: audit_logs
+          actions: [inspect, delete]
+          retention_columns: [created_at]
+          max_delete_rows: 50000
+          max_batch_size: 1000
+
+        # Inspection only. A delete here is refused locally with
+        # DENIED_TARGET_NOT_ALLOWED, and the refusal is signed evidence that
+        # RetentionOps asked.
+        - schema: application
+          table: users
+          actions: [inspect]
+          retention_columns: [created_at]

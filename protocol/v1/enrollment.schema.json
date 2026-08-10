@@ -1,0 +1,54 @@
+{
+  "$id": "https://schemas.optigm.ca/retentionops/connector/v1/enrollment.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Enrollment",
+  "description": "The one exchange in the protocol that is not signed by an already-known key, and therefore the one that decides every later trust decision. The connector generates its key pair locally and sends only the public half; the single-use token proves the request came from someone who could read the console.",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "EnrollmentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "organization_id", "token", "public_key", "connector_version"],
+      "properties": {
+        "protocol_version": { "const": "1" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "token": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 128,
+          "description": "Single-use, short-lived. The control plane stores only its digest and burns the row on first use, in the same transaction that records the identity."
+        },
+        "public_key": {
+          "type": "string",
+          "description": "Base64 of the 32 raw Ed25519 public key bytes. The private half is generated on the customer's host and has no representation in this protocol at all.",
+          "pattern": "^[A-Za-z0-9+/]{43}=$"
+        },
+        "connector_version": { "type": "string", "maxLength": 64 },
+        "platform": { "type": "string", "maxLength": 64 }
+      }
+    },
+    "EnrollmentResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocol_version", "connector_id", "organization_id", "control_plane_public_key"],
+      "properties": {
+        "protocol_version": { "const": "1" },
+        "connector_id": { "$ref": "#/$defs/uuid" },
+        "organization_id": { "$ref": "#/$defs/uuid" },
+        "control_plane_public_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{43}=$",
+          "description": "Pinned on first enrollment. Every later job signature is checked against this key, so rotating it is a deliberate, visible operation rather than something a request can do."
+        },
+        "issued_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/EnrollmentRequest" },
+    { "$ref": "#/$defs/EnrollmentResponse" }
+  ]
+}

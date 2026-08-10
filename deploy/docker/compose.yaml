@@ -1,0 +1,41 @@
+# RetentionOps Connector with Docker Compose.
+#
+# No ports are published. The connector dials out; nothing needs to reach it. If you want
+# Prometheus to scrape it, put Prometheus on this network rather than publishing a port.
+services:
+  connector:
+    image: ghcr.io/solutions-optigm/retentionops-connector@sha256:REPLACE_ME
+    command: ["run", "--config", "/etc/retentionops/connector.yaml"]
+    restart: unless-stopped
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./connector.yaml:/etc/retentionops/connector.yaml:ro
+      - ./certs:/etc/retentionops/certs:ro
+      - state:/var/lib/retentionops
+    secrets:
+      - source: postgres_reader_password
+        target: /etc/retentionops/secrets/reader-password
+        mode: 0400
+      - source: postgres_executor_password
+        target: /etc/retentionops/secrets/executor-password
+        mode: 0400
+    networks: [egress, database]
+
+volumes:
+  # The identity file and the replay ledger. Losing the ledger means a captured job could be
+  # accepted a second time inside its expiry window, so this must survive a container replace.
+  state:
+
+secrets:
+  postgres_reader_password:
+    file: ./secrets/reader-password
+  postgres_executor_password:
+    file: ./secrets/executor-password
+
+networks:
+  egress:
+  database:
+    external: true

@@ -1,0 +1,48 @@
+[Unit]
+Description=RetentionOps Connector
+Documentation=https://github.com/solutions-optigm/retentionops-connector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/retentionops-connector run --config /etc/retentionops/connector.yaml
+Restart=on-failure
+RestartSec=5s
+
+User=retentionops
+Group=retentionops
+
+# The connector needs to read its config and certificates, and to write its identity and
+# replay ledger. Everything else on the filesystem is off limits — a process holding delete
+# rights on a production database has no business being able to write to /usr.
+StateDirectory=retentionops
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/retentionops
+
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# Outbound only. The connector opens no listening socket for RetentionOps; if you enable
+# the metrics listener, keep it on loopback.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

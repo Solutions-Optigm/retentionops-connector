@@ -1,0 +1,42 @@
+{
+  "$id": "https://schemas.optigm.ca/retentionops/connector/v1/event.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobEvent",
+  "description": "Per-batch progress. Emitted after each committed batch so that a connector killed mid-job still leaves an accurate record of exactly how far it got — the control plane never has to infer it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "job_id",
+    "organization_id",
+    "connector_id",
+    "sequence",
+    "event_type",
+    "occurred_at"
+  ],
+  "properties": {
+    "protocol_version": { "const": "1" },
+    "job_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "connector_id": { "$ref": "#/$defs/uuid" },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Strictly increasing per job. The control plane stores (job_id, sequence) as a unique key, so a retried delivery is idempotent."
+    },
+    "event_type": {
+      "type": "string",
+      "enum": ["ACCEPTED", "BATCH_COMMITTED", "PAUSED", "RESUMED", "ABORTED"]
+    },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "affected_rows": { "type": "integer", "minimum": 0 },
+    "cumulative_rows": { "type": "integer", "minimum": 0 },
+    "duration_ms": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    }
+  }
+}

@@ -1,0 +1,219 @@
+{
+  "$id": "https://schemas.optigm.ca/retentionops/connector/v1/job.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobEnvelope",
+  "description": "The only thing the RetentionOps control plane may ask a connector to do. The operation set is closed and the payload is declarative: there is no field anywhere in this schema that carries SQL, a script, a command, a file path or a connection string. A control plane that has been compromised can therefore only ask for an operation that already exists, on a target the local safety policy already allows.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "job_id",
+    "organization_id",
+    "connector_id",
+    "data_source_id",
+    "operation",
+    "issued_at",
+    "expires_at",
+    "nonce",
+    "signature"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": "1",
+      "description": "A connector refuses any version it was not built against. Forward compatibility is obtained by shipping a new connector, never by guessing."
+    },
+    "job_id": { "$ref": "#/$defs/uuid" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "connector_id": {
+      "$ref": "#/$defs/uuid",
+      "description": "Refused unless it equals this connector's own enrolled identity, so a job addressed to another connector cannot be replayed here."
+    },
+    "data_source_id": { "$ref": "#/$defs/uuid" },
+    "operation": { "$ref": "#/$defs/operation" },
+    "target": { "$ref": "#/$defs/target" },
+    "predicate": { "$ref": "#/$defs/predicate" },
+    "condition": { "$ref": "#/$defs/condition" },
+    "holds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/condition" }
+    },
+    "limits": { "$ref": "#/$defs/limits" },
+    "drift": { "$ref": "#/$defs/drift" },
+    "plan_digest": {
+      "$ref": "#/$defs/digest",
+      "description": "Binds the job to the exact plan a human approved. Required for every destructive operation."
+    },
+    "approval": { "$ref": "#/$defs/approval" },
+    "issued_at": { "type": "string", "format": "date-time" },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "A job that arrives late is refused rather than executed late: the database it was planned against has moved on."
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{22,64}$",
+      "description": "Single-use. The connector keeps a durable ledger of seen nonces until expiry, which is what makes a captured DELETE unusable twice."
+    },
+    "signature": {
+      "$ref": "#/$defs/signature",
+      "description": "Ed25519 over 'RetentionOps-Job-v1\\n' followed by the RFC 8785 canonical form of this document with the signature member removed."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "operation": { "enum": ["POSTGRES_COUNT", "POSTGRES_DELETE"] } },
+        "required": ["operation"]
+      },
+      "then": { "required": ["target", "predicate", "holds", "limits"] }
+    },
+    {
+      "if": {
+        "properties": { "operation": { "const": "POSTGRES_DELETE" } },
+        "required": ["operation"]
+      },
+      "then": { "required": ["target", "predicate", "limits", "drift", "plan_digest", "approval"] }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "signature": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9+/]{86}==$" },
+    "identifier": {
+      "type": "string",
+      "description": "An unquoted lowercase PostgreSQL identifier. Anything outside this pattern is refused before it can reach a query builder; the connector never interpolates a name it has not matched here.",
+      "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+    },
+    "operation": {
+      "type": "string",
+      "description": "Closed set. Adding a member is a protocol version change reviewed as a security change, because every member is a new capability granted to the control plane.",
+      "enum": [
+        "POSTGRES_TEST_CONNECTION",
+        "POSTGRES_DISCOVER",
+        "POSTGRES_COUNT",
+        "POSTGRES_DELETE"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "table"],
+      "properties": {
+        "schema": { "$ref": "#/$defs/identifier" },
+        "table": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "predicate": {
+      "type": "object",
+      "description": "A retention predicate, not an expression language. One column, one comparison, one literal value bound as a query parameter.",
+      "additionalProperties": false,
+      "required": ["type", "column", "value"],
+      "properties": {
+        "type": { "type": "string", "enum": ["BEFORE", "ON_OR_BEFORE"] },
+        "column": { "$ref": "#/$defs/identifier" },
+        "value": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Always an RFC 3339 instant. Bound as a parameter, never rendered into the statement."
+        }
+      }
+    },
+    "condition": {
+      "description": "Closed declarative condition tree. It contains identifiers, operators and bound JSON literals, never an expression or SQL fragment.",
+      "oneOf": [
+        { "$ref": "#/$defs/condition_predicate" },
+        { "$ref": "#/$defs/condition_all" },
+        { "$ref": "#/$defs/condition_any" },
+        { "$ref": "#/$defs/condition_not" }
+      ]
+    },
+    "condition_predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "operator"],
+      "properties": {
+        "column": { "$ref": "#/$defs/identifier" },
+        "operator": {
+          "type": "string",
+          "enum": ["eq", "neq", "lt", "lte", "gt", "gte", "in", "notIn", "isNull", "isNotNull", "beforeCutoff", "afterCutoff"]
+        },
+        "value": {
+          "oneOf": [
+            { "type": ["string", "integer", "boolean"] },
+            { "type": "array", "minItems": 1, "maxItems": 100, "items": { "type": ["string", "integer", "boolean"] } }
+          ]
+        }
+      }
+    },
+    "condition_all": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all"],
+      "properties": { "all": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/condition" } } }
+    },
+    "condition_any": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["any"],
+      "properties": { "any": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/condition" } } }
+    },
+    "condition_not": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["not"],
+      "properties": { "not": { "$ref": "#/$defs/condition" } }
+    },
+    "limits": {
+      "type": "object",
+      "description": "Ceilings the control plane requests. The local safety policy may only lower them, never raise them.",
+      "additionalProperties": false,
+      "required": ["batch_size", "max_rows", "statement_timeout_seconds"],
+      "properties": {
+        "batch_size": { "type": "integer", "minimum": 1, "maximum": 50000 },
+        "max_rows": { "type": "integer", "minimum": 1, "maximum": 100000000 },
+        "statement_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "lock_timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 600 },
+        "max_duration_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "pause_between_batches_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60000,
+          "description": "Approved delay after a committed batch and its control checkpoint."
+        }
+      }
+    },
+    "drift": {
+      "type": "object",
+      "description": "What the plan measured, and how far reality may have moved since. The connector recounts before deleting and refuses the job if the gap is wider than this.",
+      "additionalProperties": false,
+      "required": ["expected_rows"],
+      "properties": {
+        "expected_rows": { "type": "integer", "minimum": 0, "maximum": 100000000 },
+        "max_rows": { "type": "integer", "minimum": 0, "maximum": 100000000 },
+        "max_basis_points": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000,
+          "description": "Hundredths of one percent: 50 means 0.5%. The protocol carries no floating-point number anywhere, because two canonicalizers agreeing on the digest of a float is a far harder guarantee than this feature is worth."
+        }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "description": "Evidence that a human approved this exact plan digest. Its absence is refused locally, so the control plane cannot execute without one even against its own database.",
+      "additionalProperties": false,
+      "required": ["id", "approved_at", "expires_at"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "approved_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

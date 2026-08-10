@@ -1,0 +1,86 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+  # Keyless Sigstore signing: the certificate records which workflow, at which tag, produced
+  # the artifact. There is no long-lived signing key for anyone to steal.
+  id-token: write
+  attestations: write
+
+jobs:
+  binaries:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build
+        run: make dist VERSION=${GITHUB_REF_NAME#v}
+
+      - name: Software bill of materials
+        run: make sbom
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+
+      - name: Sign every artifact
+        run: |
+          for artifact in dist/retentionops-connector-* dist/sbom.cdx.json; do
+            cosign sign-blob --yes \
+              --output-signature "$artifact.sig" \
+              --output-certificate "$artifact.pem" \
+              "$artifact"
+          done
+
+      - uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2
+        with:
+          subject-path: dist/retentionops-connector-*
+
+      - uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda
+        with:
+          files: |
+            dist/retentionops-connector-*
+            dist/checksums.txt
+            dist/sbom.cdx.json
+          generate_release_notes: true
+
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ github.ref_name }}
+          tags: |
+            ghcr.io/solutions-optigm/retentionops-connector:${{ github.ref_name }}
+            ghcr.io/solutions-optigm/retentionops-connector:latest
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+      - name: Sign the image by digest
+        run: |
+          cosign sign --yes \
+            ghcr.io/solutions-optigm/retentionops-connector@${{ steps.build.outputs.digest }}

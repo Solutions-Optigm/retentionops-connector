@@ -1,0 +1,78 @@
+{
+  "$id": "https://schemas.optigm.ca/retentionops/connector/v1/heartbeat.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Heartbeat",
+  "description": "Liveness and self-declared shape. A connector announces which operations it implements and which sources it has been configured with locally; the control plane may never add either. This is what makes the customer's file the authority on what RetentionOps can reach.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "organization_id",
+    "connector_id",
+    "connector_version",
+    "occurred_at",
+    "capabilities",
+    "policy_digest"
+  ],
+  "properties": {
+    "protocol_version": { "const": "1" },
+    "organization_id": { "$ref": "#/$defs/uuid" },
+    "connector_id": { "$ref": "#/$defs/uuid" },
+    "connector_version": { "type": "string", "maxLength": 64 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "platform": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "GOOS/GOARCH only. Never a hostname: that is customer infrastructure detail we have no reason to hold."
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "enum": [
+          "POSTGRES_TEST_CONNECTION",
+          "POSTGRES_DISCOVER",
+          "POSTGRES_COUNT",
+          "POSTGRES_DELETE"
+        ]
+      }
+    },
+    "policy_digest": {
+      "$ref": "#/$defs/digest",
+      "description": "Digest of the local safety policy in force. A change is visible to the customer in the console; nothing in the control plane can cause one."
+    },
+    "sources": {
+      "type": "array",
+      "maxItems": 500,
+      "items": { "$ref": "#/$defs/source_status" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "source_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["data_source_id", "type", "status"],
+      "properties": {
+        "data_source_id": { "$ref": "#/$defs/uuid" },
+        "type": { "type": "string", "enum": ["postgresql"] },
+        "status": { "type": "string", "enum": ["READY", "DEGRADED", "UNCONFIGURED", "FAILED"] },
+        "last_check_at": { "type": "string", "format": "date-time" },
+        "database_version": { "type": "string", "maxLength": 64 },
+        "tls_mode": { "type": "string", "enum": ["verify-full", "verify-ca", "require"] },
+        "reader_validated": { "type": "boolean" },
+        "executor_validated": { "type": "boolean" },
+        "allowed_tables": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "A count, not a list. The console shows the customer how wide they opened the door without our storing which tables they own."
+        }
+      }
+    }
+  }
+}
