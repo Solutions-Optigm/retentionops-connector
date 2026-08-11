@@ -47,6 +47,19 @@ type Client struct {
 // New builds a client. An identity of nil is valid only for enrollment, which is the one call
 // made before the connector has one.
 func New(baseURL, caFile, version string, id *identity.Identity, timeout time.Duration) (*Client, error) {
+	httpClient, err := newHTTPClient(caFile, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		baseURL:  baseURL,
+		http:     httpClient,
+		identity: id,
+		version:  version,
+	}, nil
+}
+
+func newHTTPClient(caFile string, timeout time.Duration) (*http.Client, error) {
 	transport := &http.Transport{
 		// The connector never needs many connections to one host, and an idle pool that outlives
 		// a network change is a source of confusing failures on customer networks.
@@ -65,12 +78,29 @@ func New(baseURL, caFile, version string, id *identity.Identity, timeout time.Du
 	} else {
 		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
-	return &Client{
-		baseURL:  baseURL,
-		http:     &http.Client{Transport: transport, Timeout: timeout},
-		identity: id,
-		version:  version,
-	}, nil
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
+}
+
+// Probe proves that the configured control-plane TLS path can complete a handshake. It stops at
+// the first HTTP response because redirects belong to the browser surface, not connector health.
+func Probe(ctx context.Context, baseURL, caFile string, timeout time.Duration) (int, error) {
+	client, err := newHTTPClient(caFile, timeout)
+	if err != nil {
+		return 0, err
+	}
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodHead, baseURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	return response.StatusCode, nil
 }
 
 func loadCertPool(caFile string) (*x509.CertPool, error) {

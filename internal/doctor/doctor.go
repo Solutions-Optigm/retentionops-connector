@@ -11,13 +11,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/solutions-optigm/retentionops-connector/adapters/postgres"
 	"github.com/solutions-optigm/retentionops-connector/internal/config"
+	"github.com/solutions-optigm/retentionops-connector/internal/controlplane"
 	"github.com/solutions-optigm/retentionops-connector/internal/identity"
 	"github.com/solutions-optigm/retentionops-connector/secrets"
 )
@@ -126,19 +126,14 @@ func checkControlPlane(ctx context.Context, report *Report, configuration *confi
 
 	// A HEAD to the root proves TLS and reachability without asserting anything about the API
 	// surface. Any HTTP status at all means the handshake completed, which is the question.
-	client := &http.Client{Timeout: 10 * time.Second}
-	request, err := http.NewRequestWithContext(ctx, http.MethodHead, configuration.ControlPlane.URL, nil)
+	status, err := controlplane.Probe(
+		ctx, configuration.ControlPlane.URL, configuration.ControlPlane.CAFile, 10*time.Second,
+	)
 	if err != nil {
 		report.add("Control plane HTTPS", Fail, "%v", err)
 		return
 	}
-	response, err := client.Do(request)
-	if err != nil {
-		report.add("Control plane HTTPS", Fail, "%v", err)
-		return
-	}
-	defer response.Body.Close()
-	report.add("Control plane HTTPS", Pass, "TLS established, HTTP %d", response.StatusCode)
+	report.add("Control plane HTTPS", Pass, "TLS established, HTTP %d", status)
 }
 
 func checkSource(ctx context.Context, report *Report, id string, source *config.Source, registry *secrets.Registry) {
