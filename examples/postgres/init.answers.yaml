@@ -1,0 +1,24 @@
+# Strict, non-interactive input for `retentionops-connector init --answers-file`.
+# It contains secret references only. Never put a password or enrollment token in this file.
+version: 1
+platform: systemd
+output_directory: ./retentionops-connector-init
+source_id: 4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52
+control_plane:
+  url: https://connector.retentionops.ca
+source:
+  host: db.production.internal
+  port: 5432
+  database: production
+  tls_ca_file: /etc/retentionops/certs/postgres-ca.pem
+  reader:
+    username: retentionops_reader
+    password:
+      provider: file
+      ref: /etc/retentionops/secrets/reader-password
+  executor:
+    username: retentionops_executor
+    password:
+      provider: file
+      ref: /etc/retentionops/secrets/executor-password
+  allowed_schemas: [application]

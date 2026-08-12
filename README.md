@@ -64,14 +64,22 @@ no representation anywhere in the protocol: [`secrets/`](secrets/).
 # 1. Install the binary (or use ghcr.io/solutions-optigm/retentionops-connector)
 make build
 
-# 2. Write /etc/retentionops/connector.yaml — start from examples/postgres/connector.yaml
-retentionops-connector validate-config --config /etc/retentionops/connector.yaml
+# 2. Generate a private, reviewable installation bundle (the console supplies both IDs)
+retentionops-connector init --platform systemd \
+  --source 4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52 \
+  --control-plane https://connector.retentionops.ca
+
+# For automation, use the strict reference-only schema in examples/postgres/init.answers.yaml
+retentionops-connector init --answers-file examples/postgres/init.answers.yaml
+
+# Review and install the generated files, then validate locally
+retentionops-connector validate-config --config ./retentionops-connector-init/connector.yaml
 
 # 3. Enrol, with the one-time token from the RetentionOps console
 retentionops-connector enroll \
   --url https://connector.retentionops.ca \
   --organization 3f2b9c14-8e1a-4b6d-9a7c-2d5e0f183b44 \
-  --token rtc_...
+  --token-file ./enrollment-token
 
 # 4. Check everything before you start it
 retentionops-connector doctor

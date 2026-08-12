@@ -243,7 +243,7 @@ sudo -u retentionops retentionops-connector enroll \
   --config /etc/retentionops/connector.yaml \
   --url https://connector.retentionops.ca \
   --organization YOUR_ORGANIZATION_UUID \
-  --token YOUR_SINGLE_USE_TOKEN
+  --token-file ./enrollment-token
 ```
 
 Compare the printed control-plane-key fingerprint with the fingerprint displayed by the issuing
@@ -278,12 +278,14 @@ Linux capabilities and enables systemd hardening controls. It restarts after a f
 before rotating or removing its identity or state volume; do not delete the replay ledger during a
 normal redeploy.
 
-### Docker or Kubernetes
+### Docker Compose
 
-Use the supplied [Docker Compose](../deploy/docker/compose.yaml) or
-[Kubernetes StatefulSet](../deploy/kubernetes/connector.yaml) as reviewed deployment templates.
+Use the supplied [Docker Compose](../deploy/docker/compose.yaml) as a reviewed deployment template.
 Replace `REPLACE_ME` with a verified image digest, mount the configuration, CA and credentials
 read-only, and use persistent storage for `/var/lib/retentionops`.
+
+The signed OCI image may be integrated into Kubernetes by a customer, but RetentionOps does not
+publish or maintain a Kubernetes manifest in the initial support scope.
 
 Run exactly one replica per connector identity. Two replicas with independent replay ledgers can
 accept the same delivered job; two replicas sharing a ledger add no useful throughput because the

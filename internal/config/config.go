@@ -224,13 +224,15 @@ func (s *Source) validate(id string) error {
 	if err := s.Reader.validate(id, "reader"); err != nil {
 		return err
 	}
-	if s.Safety.GrantsDelete() {
+	if s.Executor.Username != "" || s.Executor.Password.Provider != "" || s.Executor.Password.Ref != "" {
 		if err := s.Executor.validate(id, "executor"); err != nil {
 			return err
 		}
 		if s.Executor.Username == s.Reader.Username {
 			return fmt.Errorf("source %s: reader and executor are the same role, which erases the separation the two-identity design exists for", id)
 		}
+	} else if s.Safety.GrantsDelete() {
+		return fmt.Errorf("source %s: executor is required because the local policy grants delete", id)
 	}
 	if err := s.Safety.Validate(); err != nil {
 		return fmt.Errorf("source %s: safety policy: %w", id, err)

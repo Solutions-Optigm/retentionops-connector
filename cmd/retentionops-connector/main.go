@@ -1,9 +1,8 @@
 // Command retentionops-connector runs retention work inside a customer's network, on behalf of
 // a RetentionOps control plane that never sees their data or their credentials.
 //
-// It has five subcommands and no daemon-management surface of its own: process supervision
-// belongs to systemd, Kubernetes or the container runtime, all of which do it better than an
-// agent that reinvents it.
+// It has no daemon-management surface of its own: process supervision belongs to systemd or the
+// container runtime, both of which do it better than an agent that reinvents it.
 package main
 
 import (
@@ -11,9 +10,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/solutions-optigm/retentionops-connector/internal/doctor"
 	"github.com/solutions-optigm/retentionops-connector/internal/enrollment"
 	"github.com/solutions-optigm/retentionops-connector/internal/identity"
+	"github.com/solutions-optigm/retentionops-connector/internal/initializer"
 	"github.com/solutions-optigm/retentionops-connector/internal/telemetry"
 	protocolv1 "github.com/solutions-optigm/retentionops-connector/protocol/v1"
 	"github.com/solutions-optigm/retentionops-connector/secrets"
@@ -37,8 +40,10 @@ const defaultConfigPath = "/etc/retentionops/connector.yaml"
 const usage = `retentionops-connector %s — RetentionOps data-plane connector
 
 Usage:
+  retentionops-connector init --platform systemd|compose --source UUID --control-plane HTTPS_URL
+  retentionops-connector init --answers-file PATH
   retentionops-connector run              [--config PATH]
-  retentionops-connector enroll           [--config PATH] [--if-needed] --url URL --organization UUID --token TOKEN
+  retentionops-connector enroll           [--config PATH] [--if-needed] --url URL --organization UUID --token-file PATH
   retentionops-connector validate-config  [--config PATH]
   retentionops-connector doctor           [--config PATH]
   retentionops-connector source test      [--config PATH] DATA_SOURCE_ID
@@ -66,6 +71,8 @@ func run(arguments []string) error {
 	defer stop()
 
 	switch arguments[0] {
+	case "init":
+		return runInit(arguments[1:], os.Stdin, os.Stdout)
 	case "run":
 		return runConnector(ctx, arguments[1:])
 	case "enroll":
@@ -85,6 +92,57 @@ func run(arguments []string) error {
 	default:
 		return fmt.Errorf("unknown subcommand %q", arguments[0])
 	}
+}
+
+func runInit(arguments []string, in *os.File, out *os.File) error {
+	return runInitIO(arguments, in, out)
+}
+
+func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
+	set := flag.NewFlagSet("init", flag.ContinueOnError)
+	set.SetOutput(out)
+	platform := set.String("platform", "", "deployment platform: systemd or compose")
+	sourceID := set.String("source", "", "data source UUID from the console")
+	controlPlane := set.String("control-plane", "", "RetentionsOps HTTPS control-plane URL")
+	answersFile := set.String("answers-file", "", "strict versioned YAML answers file")
+	if err := set.Parse(arguments); err != nil {
+		return err
+	}
+	if set.NArg() != 0 {
+		return errors.New("init accepts flags only")
+	}
+	var answers initializer.Answers
+	if *answersFile != "" {
+		if *platform != "" || *sourceID != "" || *controlPlane != "" {
+			return errors.New("--answers-file cannot be combined with interactive installation flags")
+		}
+		loaded, err := initializer.LoadAnswers(*answersFile)
+		if err != nil {
+			return err
+		}
+		answers = loaded
+	} else {
+		if *platform == "" || *sourceID == "" || *controlPlane == "" {
+			return errors.New("--platform, --source and --control-plane are required in interactive mode")
+		}
+		if err := initializer.ValidateControlPlaneFlag(*controlPlane); err != nil {
+			return err
+		}
+		answers = initializer.Answers{
+			Version: initializer.AnswersVersion, Platform: *platform, SourceID: *sourceID,
+			ControlPlane: initializer.ControlPlane{URL: *controlPlane},
+		}
+		var err error
+		answers, err = initializer.Interactive(in, out, answers)
+		if err != nil {
+			return err
+		}
+	}
+	if err := initializer.Generate(answers); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Installation bundle written to %s. No SQL was executed and no network request was made.\n", answers.OutputDirectory)
+	return nil
 }
 
 func joinNames() string {
@@ -161,13 +219,13 @@ func runEnroll(ctx context.Context, arguments []string) error {
 	path := configFlag(set)
 	url := set.String("url", "", "control-plane base URL, for example https://connector.retentionops.ca")
 	organization := set.String("organization", "", "organization UUID shown in the console")
-	token := set.String("token", "", "single-use enrollment token shown in the console")
+	tokenFile := set.String("token-file", "", "private file containing the single-use enrollment token")
 	ifNeeded := set.Bool("if-needed", false, "reuse a valid local identity without contacting the control plane")
 	if err := set.Parse(arguments); err != nil {
 		return err
 	}
-	if *url == "" || *organization == "" || *token == "" {
-		return errors.New("--url, --organization and --token are all required")
+	if *url == "" || *organization == "" || *tokenFile == "" {
+		return errors.New("--url, --organization and --token-file are all required")
 	}
 	configuration, err := config.Load(*path)
 	if err != nil {
@@ -184,10 +242,14 @@ func runEnroll(ctx context.Context, arguments []string) error {
 			return nil
 		}
 	}
+	token, err := readPrivateToken(*tokenFile)
+	if err != nil {
+		return err
+	}
 	id, err := enrollment.Run(ctx, enrollment.Request{
 		ControlPlaneURL: *url,
 		OrganizationID:  *organization,
-		Token:           *token,
+		Token:           token,
 		Version:         version,
 		CAFile:          configuration.ControlPlane.CAFile,
 		Directory:       configuration.Identity.Directory,
@@ -202,6 +264,28 @@ func runEnroll(ctx context.Context, arguments []string) error {
 	fmt.Printf("  pinned control-plane key %s\n", identity.Fingerprint(id.ControlPlaneKey()))
 	fmt.Printf("\nCompare that fingerprint with the one shown in the console before you start the connector.\n")
 	return nil
+}
+
+func readPrivateToken(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("enrollment token file: %w", err)
+	}
+	if mode := info.Mode().Perm(); mode&fs.FileMode(0o077) != 0 {
+		return "", fmt.Errorf("enrollment token file is mode %#o; it must not be accessible by group or other", mode)
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // explicit operator-supplied private file
+	if err != nil {
+		return "", fmt.Errorf("enrollment token file: %w", err)
+	}
+	if len(raw) > 4096 {
+		return "", errors.New("enrollment token file is unexpectedly large")
+	}
+	token := strings.TrimSpace(string(raw))
+	if token == "" {
+		return "", errors.New("enrollment token file is empty")
+	}
+	return token, nil
 }
 
 func runValidate(arguments []string) error {
