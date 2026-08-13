@@ -29,6 +29,8 @@ jobs:
         run: make check
       - name: Build every release platform
         run: make dist
+      - name: Build the release SBOM with the pinned generator
+        run: make sbom
 
   # The whole value proposition of this component is that a reader can enumerate what it can do.
   # These greps fail the build if that stops being true, so the claim cannot rot silently.

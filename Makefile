@@ -1,4 +1,5 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.1.0-dev)
+SBOM_TOOL_VERSION ?= v1.10.0
 LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := retentionops-connector
 PLATFORMS := linux/amd64 linux/arm64
@@ -49,7 +50,7 @@ dist:
 
 sbom:
 	@mkdir -p dist
-	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@latest mod -json -output dist/sbom.cdx.json
+	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@$(SBOM_TOOL_VERSION) mod -json -output dist/sbom.cdx.json
 
 clean:
 	rm -rf dist

@@ -11,7 +11,7 @@ retentionops-connector v0.1.0
 ├── retentionops-connector-linux-arm64
 ├── checksums.txt
 ├── sbom.cdx.json                     CycloneDX inventory
-├── *.sig, *.pem                      Sigstore signatures and certificates
+├── *.sig, *.pem                      Sigstore signatures and certificates for every artifact
 └── ghcr.io/solutions-optigm/retentionops-connector:0.1.0
 ```
 
@@ -31,6 +31,10 @@ cosign verify-blob \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   retentionops-connector-linux-amd64
 ```
+
+Apply the same command to `checksums.txt` and `sbom.cdx.json` with their matching certificate and
+signature. GitHub also publishes build provenance attestations for both binaries, the checksum
+manifest and the SBOM. The OCI image carries its own BuildKit provenance and SBOM attestations.
 
 Keyless signing: there is no long-lived private key to steal, and the certificate identity
 records which workflow, at which tag, produced the artifact.

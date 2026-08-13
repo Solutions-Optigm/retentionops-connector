@@ -83,3 +83,7 @@ git push git@github.com:solutions-optigm/retentionops-connector.git \
 Before pushing, the maintainer runs `make check`, `make dist`, and the containment checks, then
 inspects the split branch for private paths or names. Tags and release artifacts are created only
 in the public repository, where the release workflow signs what it builds.
+
+The private repository also runs `scripts/verify_connector_public_tree.sh connector` before the
+split. After splitting, run the same verifier against an exported checkout of the split branch;
+generated `dist/` binaries and private repository paths make the publication fail closed.
