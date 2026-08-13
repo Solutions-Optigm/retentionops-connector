@@ -55,8 +55,12 @@ jobs:
           test -z "$offenders" || (echo "SQL outside adapters/postgres: $offenders" && exit 1)
       - name: The operation set has not grown without a schema change
         run: |
-          declared=$(grep -c '"POSTGRES_' protocol/v1/job.schema.json)
-          test "$declared" -eq 4 \
+          jq -e '.["$defs"].operation.enum == [
+            "POSTGRES_TEST_CONNECTION",
+            "POSTGRES_DISCOVER",
+            "POSTGRES_COUNT",
+            "POSTGRES_DELETE"
+          ]' protocol/v1/job.schema.json >/dev/null \
             || (echo "the operation enum changed; this needs an ADR and a security review" && exit 1)
 
   vulnerabilities:
