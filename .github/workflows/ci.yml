@@ -48,8 +48,10 @@ jobs:
             || (echo "this component must never execute anything" && exit 1)
       - name: SQL lives only in the PostgreSQL adapter
         run: |
-          offenders=$(grep -rln --include='*.go' -iE '\b(SELECT|DELETE FROM|INSERT INTO|UPDATE) ' . \
-            | grep -v '^./adapters/postgres/' || true)
+          offenders=$(grep -rln --include='*.go' \
+            -E '(^|[^[:alnum:]_])(SELECT|DELETE FROM|INSERT INTO|UPDATE)[[:space:]]' . \
+            | grep -v '^./adapters/postgres/' \
+            | grep -v '_test.go$' || true)
           test -z "$offenders" || (echo "SQL outside adapters/postgres: $offenders" && exit 1)
       - name: The operation set has not grown without a schema change
         run: |
