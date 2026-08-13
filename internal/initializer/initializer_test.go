@@ -85,6 +85,52 @@ func TestGenerateIsIdempotentAndPreservesInstalledSecrets(t *testing.T) {
 	}
 }
 
+// The generated instructions are the whole installation guide once init has run: a step that
+// names the staging directory where the connector reads a runtime path sends the operator into a
+// missing-file error with no way to tell it apart from a refusal.
+func TestNextStepsUseTheRuntimePathsTheConfigurationDeclares(t *testing.T) {
+	for _, platform := range []string{PlatformSystemd, PlatformCompose} {
+		output := filepath.Join(t.TempDir(), "bundle")
+		answers := validAnswers(output, platform)
+		if err := Generate(answers); err != nil {
+			t.Fatal(err)
+		}
+		steps := read(t, filepath.Join(output, "NEXT-STEPS.txt"))
+		required := []string{runtimeConfigPath, answers.Source.TLSCAFile, answers.SourceID}
+		if platform == PlatformSystemd {
+			// Compose mounts the staged files at these references; systemd has to install them.
+			required = append(required, answers.Source.Reader.Password.Ref)
+		}
+		for _, path := range required {
+			if !strings.Contains(steps, path) {
+				t.Fatalf("%s: NEXT-STEPS.txt never names %s", platform, path)
+			}
+		}
+		if strings.Contains(steps, "--token ") || !strings.Contains(steps, "--token-file") {
+			t.Fatalf("%s: enrollment instructions must keep the token out of process arguments", platform)
+		}
+		if platform == PlatformSystemd && !strings.Contains(steps, identityDirectory) {
+			t.Fatal("systemd instructions must create the identity directory the connector needs")
+		}
+	}
+}
+
+// Without this mount the container cannot read the CA the configuration pins, and the shortest
+// path out of the resulting failure is downgrading TLS.
+func TestComposeMountsTheCertificateTheConfigurationPins(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "bundle")
+	answers := validAnswers(output, PlatformCompose)
+	if err := Generate(answers); err != nil {
+		t.Fatal(err)
+	}
+	compose := read(t, filepath.Join(output, "compose.yaml"))
+	want := "./certs/postgres-ca.pem:" + answers.Source.TLSCAFile + ":ro"
+	if !strings.Contains(compose, want) {
+		t.Fatalf("compose.yaml does not mount the pinned CA certificate:\n%s", compose)
+	}
+	assertMode(t, filepath.Join(output, "certs"), 0o700)
+}
+
 func TestInteractiveAndAnswersFileProduceTheSameArtifacts(t *testing.T) {
 	fileOutput := filepath.Join(t.TempDir(), "from-file")
 	interactiveOutput := filepath.Join(t.TempDir(), "interactive")

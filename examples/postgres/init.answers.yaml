@@ -5,7 +5,7 @@ platform: systemd
 output_directory: ./retentionops-connector-init
 source_id: 4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52
 control_plane:
-  url: https://connector.retentionops.ca
+  url: https://connector.retentionops.app
 source:
   host: db.production.internal
   port: 5432

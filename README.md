@@ -67,7 +67,7 @@ make build
 # 2. Generate a private, reviewable installation bundle (the console supplies both IDs)
 retentionops-connector init --platform systemd \
   --source 4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52 \
-  --control-plane https://connector.retentionops.ca
+  --control-plane https://connector.retentionops.app
 
 # For automation, use the strict reference-only schema in examples/postgres/init.answers.yaml
 retentionops-connector init --answers-file examples/postgres/init.answers.yaml
@@ -77,7 +77,7 @@ retentionops-connector validate-config --config ./retentionops-connector-init/co
 
 # 3. Enrol, with the one-time token from the RetentionOps console
 retentionops-connector enroll \
-  --url https://connector.retentionops.ca \
+  --url https://connector.retentionops.app \
   --organization 3f2b9c14-8e1a-4b6d-9a7c-2d5e0f183b44 \
   --token-file ./enrollment-token
 
@@ -97,7 +97,7 @@ Local policy               PASS  sha256:6f0c…
 Identity storage           PASS  /var/lib/retentionops/identity
 Connector identity         PASS  connector 9d1e… in organization 3f2b…
 Pinned control-plane key   PASS  MCowBQYD…kJv7Qg=
-Control plane DNS          PASS  connector.retentionops.ca
+Control plane DNS          PASS  connector.retentionops.app
 Control plane HTTPS        PASS  TLS established, HTTP 404
 Source 4a9f2c11 TCP        PASS  db.production.internal:5432
 Source 4a9f2c11 reader…    PASS  resolved through aws-secrets-manager
@@ -111,7 +111,7 @@ the important part — what RetentionOps is allowed to do there.
 
 ```yaml
 control_plane:
-  url: https://connector.retentionops.ca
+  url: https://connector.retentionops.app
 
 identity: { directory: /var/lib/retentionops/identity }
 state:    { directory: /var/lib/retentionops/state }

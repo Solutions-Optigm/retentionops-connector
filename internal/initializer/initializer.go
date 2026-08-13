@@ -31,6 +31,15 @@ const (
 	PlatformCompose = "compose"
 )
 
+// Runtime locations the generated artifacts agree on. The bundle is a staging directory; every
+// command in NEXT-STEPS.txt points at the path the running connector will actually read.
+const (
+	identityDirectory = "/var/lib/retentionops/identity"
+	stateDirectory    = "/var/lib/retentionops/state"
+	runtimeConfigPath = "/etc/retentionops/connector.yaml"
+	imageRepository   = "ghcr.io/solutions-optigm/retentionops-connector"
+)
+
 // Answers is the strict, versioned input shared by interactive and unattended initialization.
 // Credential fields are SecretRef values, so there is deliberately nowhere to put a secret.
 type Answers struct {
@@ -192,6 +201,11 @@ func Generate(answers Answers) error {
 		artifacts["retentionops-connector.service"] = []byte(systemdUnit)
 	} else {
 		artifacts["compose.yaml"] = []byte(renderCompose(answers))
+		// compose.yaml bind-mounts the CA certificate from here. Without the directory Docker
+		// would create one in its place and the source check would fail on an unreadable file.
+		if err := os.MkdirAll(filepath.Join(output, "certs"), 0o700); err != nil {
+			return fmt.Errorf("init: create certificates directory: %w", err)
+		}
 	}
 	for name, content := range artifacts {
 		if err := writeFile(filepath.Join(output, name), content, 0o600); err != nil {
@@ -254,8 +268,8 @@ func buildConfig(answers Answers) (*config.Config, error) {
 			URL: answers.ControlPlane.URL, PollWaitSeconds: 30, HeartbeatSeconds: 30,
 			CAFile: answers.ControlPlane.CAFile,
 		},
-		Identity:  config.Storage{Directory: "/var/lib/retentionops/identity"},
-		State:     config.Storage{Directory: "/var/lib/retentionops/state"},
+		Identity:  config.Storage{Directory: identityDirectory},
+		State:     config.Storage{Directory: stateDirectory},
 		Telemetry: config.Telemetry{MetricsAddress: "127.0.0.1:9102", LogFormat: "json", LogLevel: "info"},
 		Sources: map[string]*config.Source{
 			answers.SourceID: {
@@ -317,28 +331,159 @@ func createSecretPlaceholder(path string) error {
 	return nil
 }
 
+// renderNextSteps writes the remaining commands with the paths this bundle actually declares.
+//
+// The generated configuration resolves secrets, the CA certificate and the connector identity at
+// runtime paths that do not exist yet, and — on systemd — under a service account that does not
+// exist yet either. A guide that skipped those steps would fail on the first `source test`, which
+// is exactly the moment an operator has no way to tell a missing directory from a refusal.
 func renderNextSteps(answers Answers) string {
-	service := "sudo install -m 0600 connector.yaml /etc/retentionops/connector.yaml\n" +
-		"sudo install -m 0644 retentionops-connector.service /etc/systemd/system/retentionops-connector.service\n" +
-		"sudo systemctl enable --now retentionops-connector\n"
 	if answers.Platform == PlatformCompose {
-		service = "docker compose -f compose.yaml up -d\n"
+		return composeNextSteps(answers)
 	}
-	return fmt.Sprintf(`RetentionOps connector — next steps
+	return systemdNextSteps(answers)
+}
+
+// stagedCredentials lists the roles whose password init staged as a local file. A role resolved
+// through a secret manager has nothing to fill in and must not be told to write one.
+func stagedCredentials(answers Answers) []string {
+	staged := make([]string, 0, 2)
+	for _, candidate := range []struct {
+		name       string
+		credential config.Credential
+	}{{"reader", answers.Source.Reader}, {"executor", answers.Source.Executor}} {
+		if candidate.credential.Password.Provider == "file" {
+			staged = append(staged, candidate.name)
+		}
+	}
+	return staged
+}
+
+// fillSecrets keeps the passwords out of shell history and out of process arguments. The staged
+// placeholders are mode 0400, so they are deliberately relaxed and restored around the write.
+func fillSecrets(answers Answers) string {
+	staged := stagedCredentials(answers)
+	if len(staged) == 0 {
+		return "   Both roles resolve their password through the configured secret provider; there is\n   no local file to fill in."
+	}
+	files := make([]string, 0, len(staged))
+	writes := make([]string, 0, len(staged))
+	for _, name := range staged {
+		files = append(files, "secrets/"+name+"-password")
+		writes = append(writes, fmt.Sprintf(
+			`   read -rsp '%s password: ' password && printf '%%s' "$password" > secrets/%s-password && unset password && echo`,
+			name, name))
+	}
+	lines := append([]string{"   chmod 0600 " + strings.Join(files, " ")}, writes...)
+	return strings.Join(append(lines, "   chmod 0400 "+strings.Join(files, " ")), "\n")
+}
+
+func systemdNextSteps(answers Answers) string {
+	installed := make([]string, 0, 3)
+	if answers.Source.TLSCAFile != "" {
+		installed = append(installed, fmt.Sprintf(
+			"\n   sudo install -o root -g retentionops -m 0644 YOUR-POSTGRES-CA.pem %s", answers.Source.TLSCAFile))
+	}
+	references := map[string]config.SecretRef{
+		"reader":   answers.Source.Reader.Password,
+		"executor": answers.Source.Executor.Password,
+	}
+	for _, name := range stagedCredentials(answers) {
+		installed = append(installed, fmt.Sprintf(
+			"\n   sudo install -o retentionops -g retentionops -m 0400 secrets/%s-password %s",
+			name, references[name].Ref))
+	}
+	return fmt.Sprintf(`RetentionOps connector — next steps (systemd)
+
+Everything below runs on this host. init executed no SQL, contacted no network and started
+nothing; each command here is yours to review before you run it.
 
 1. Review connector.yaml and roles.sql. No table is authorized for deletion.
-2. Put the database passwords in the matching files under secrets/ (mode 0400).
-3. Apply roles.sql yourself with psql; init never executes SQL.
-4. retentionops-connector validate-config --config connector.yaml
-5. retentionops-connector source test --config connector.yaml %s
-6. retentionops-connector source discover --config connector.yaml %s
-7. Request a single-use enrollment token in the console and save it to secrets/enrollment-token.
-8. retentionops-connector enroll --config connector.yaml --url %s --organization ORGANIZATION_UUID --token-file secrets/enrollment-token
-9. retentionops-connector doctor --config connector.yaml
-10. Start the supervised service:
+2. Create the service account and the directories the connector reads and writes:
+   id retentionops >/dev/null 2>&1 || sudo useradd --system --home-dir /var/lib/retentionops --shell /usr/sbin/nologin retentionops
+   sudo install -d -o retentionops -g retentionops -m 0700 %s %s
+   sudo install -d -o root -g retentionops -m 0750 /etc/retentionops /etc/retentionops/certs /etc/retentionops/secrets
+3. Create the database roles yourself; init never executes SQL. psql prompts for both passwords:
+   psql "postgresql://ADMIN_ROLE@%s:%d/%s" -f roles.sql
+4. Write the same two passwords into the staged secret files:
 %s
+5. Install the configuration, the CA certificate and the secrets at the paths connector.yaml
+   declares — the connector reads them there, not from this directory:
+   sudo install -o root -g retentionops -m 0640 connector.yaml /etc/retentionops/connector.yaml%s
+6. sudo -u retentionops retentionops-connector validate-config --config %s
+7. sudo -u retentionops retentionops-connector source test --config %s %s
+8. sudo -u retentionops retentionops-connector source discover --config %s %s
+9. Request a single-use enrollment token in the console, then save it where the service account
+   can read it once. Paste it into the second command and end with Ctrl-D; a token typed as an
+   argument would survive in shell history:
+   sudo install -o retentionops -g retentionops -m 0400 /dev/null /etc/retentionops/secrets/enrollment-token
+   sudo sh -c 'cat > /etc/retentionops/secrets/enrollment-token'
+10. sudo -u retentionops retentionops-connector enroll --config %s --url %s --organization ORGANIZATION_UUID --token-file /etc/retentionops/secrets/enrollment-token
+11. sudo rm -f /etc/retentionops/secrets/enrollment-token
+12. sudo -u retentionops retentionops-connector doctor --config %s
+13. Start the supervised service:
+   sudo install -o root -g root -m 0644 retentionops-connector.service /etc/systemd/system/retentionops-connector.service
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now retentionops-connector
+   sudo systemctl status retentionops-connector
+
 The connector has not contacted RetentionOps and no service has been installed or started.
-`, answers.SourceID, answers.SourceID, answers.ControlPlane.URL, service)
+`,
+		identityDirectory, stateDirectory,
+		answers.Source.Host, answers.Source.Port, answers.Source.Database,
+		fillSecrets(answers),
+		strings.Join(installed, ""),
+		runtimeConfigPath,
+		runtimeConfigPath, answers.SourceID,
+		runtimeConfigPath, answers.SourceID,
+		runtimeConfigPath, answers.ControlPlane.URL,
+		runtimeConfigPath)
+}
+
+func composeNextSteps(answers Answers) string {
+	steps := []string{
+		"Review connector.yaml and roles.sql. No table is authorized for deletion.",
+		fmt.Sprintf(`Create the database roles yourself; init never executes SQL. psql prompts for both passwords:
+   psql "postgresql://ADMIN_ROLE@%s:%d/%s" -f roles.sql`,
+			answers.Source.Host, answers.Source.Port, answers.Source.Database),
+		"Write the same two passwords into the staged secret files:\n" + fillSecrets(answers),
+		fmt.Sprintf(`Verify the image, then pin the digest compose.yaml expects — a tag can be moved, a digest cannot:
+   digest=$(docker buildx imagetools inspect %s:latest --format '{{.Manifest.Digest}}')
+   sed -i "s|@sha256:REPLACE_WITH_VERIFIED_DIGEST|@${digest}|" compose.yaml`, imageRepository),
+		`Attach the connector to the network that reaches PostgreSQL. compose.yaml expects an
+   existing network named "database"; rename it there, or create it:
+   docker network create database`,
+	}
+	if answers.Source.TLSCAFile != "" {
+		steps = append(steps, fmt.Sprintf(
+			"Copy your PostgreSQL CA certificate to certs/%s; compose.yaml mounts it read-only at %s.",
+			filepath.Base(filepath.Clean(answers.Source.TLSCAFile)), answers.Source.TLSCAFile))
+	}
+	steps = append(steps,
+		fmt.Sprintf("docker compose run --rm connector validate-config --config %s", runtimeConfigPath),
+		fmt.Sprintf("docker compose run --rm connector source test --config %s %s", runtimeConfigPath, answers.SourceID),
+		fmt.Sprintf("docker compose run --rm connector source discover --config %s %s", runtimeConfigPath, answers.SourceID),
+		`Request a single-use enrollment token in the console and save it to secrets/enrollment-token
+   (chmod 0600 to write it, chmod 0400 afterwards).`,
+		fmt.Sprintf(`docker compose run --rm -v "$PWD/secrets/enrollment-token:/run/enrollment-token:ro" connector \
+      enroll --config %s --url %s --organization ORGANIZATION_UUID --token-file /run/enrollment-token`,
+			runtimeConfigPath, answers.ControlPlane.URL),
+		fmt.Sprintf("docker compose run --rm connector doctor --config %s", runtimeConfigPath),
+		"docker compose up -d",
+	)
+	numbered := make([]string, 0, len(steps))
+	for index, step := range steps {
+		numbered = append(numbered, fmt.Sprintf("%d. %s", index+1, step))
+	}
+	return fmt.Sprintf(`RetentionOps connector — next steps (Docker Compose)
+
+Everything below runs in this directory. init executed no SQL, contacted no network and started
+nothing; each command here is yours to review before you run it.
+
+%s
+
+The connector has not contacted RetentionOps and no service has been installed or started.
+`, strings.Join(numbered, "\n"))
 }
 
 const systemdUnit = `[Unit]
@@ -383,6 +528,19 @@ func renderCompose(answers Answers) string {
 	}
 	slices.Sort(secretMounts)
 	slices.Sort(secretDefinitions)
+	// The configuration pins TLS verify-full against a CA file the container cannot see unless
+	// this file mounts it. Without the mount the first source check fails on a missing file, and
+	// the obvious workaround — weakening TLS — is the one an operator must never be nudged into.
+	certificates := make([]string, 0, 2)
+	for _, authority := range []string{answers.Source.TLSCAFile, answers.ControlPlane.CAFile} {
+		if authority == "" {
+			continue
+		}
+		certificates = append(certificates, fmt.Sprintf("\n      - ./certs/%s:%s:ro",
+			filepath.Base(filepath.Clean(authority)), authority))
+	}
+	slices.Sort(certificates)
+	certificates = slices.Compact(certificates)
 	secretsBlock := ""
 	serviceSecrets := ""
 	if len(secretMounts) > 0 {
@@ -391,15 +549,15 @@ func renderCompose(answers Answers) string {
 	}
 	return fmt.Sprintf(`services:
   connector:
-    image: ghcr.io/solutions-optigm/retentionops-connector@sha256:REPLACE_WITH_VERIFIED_DIGEST
-    command: ["run", "--config", "/etc/retentionops/connector.yaml"]
+    image: %s@sha256:REPLACE_WITH_VERIFIED_DIGEST
+    command: ["run", "--config", %q]
     restart: unless-stopped
     user: "65532:65532"
     read_only: true
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     volumes:
-      - ./connector.yaml:/etc/retentionops/connector.yaml:ro
+      - ./connector.yaml:%s:ro%s
       - state:/var/lib/retentionops
     networks: [egress, database]%s
 
@@ -410,7 +568,7 @@ networks:
   egress:
   database:
     external: true
-%s`, serviceSecrets, secretsBlock)
+%s`, imageRepository, runtimeConfigPath, runtimeConfigPath, strings.Join(certificates, ""), serviceSecrets, secretsBlock)
 }
 
 // ValidateControlPlaneFlag provides a fast error before prompting while Config.Validate remains

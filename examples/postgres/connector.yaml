@@ -6,7 +6,7 @@
 #   retentionops-connector validate-config --config /etc/retentionops/connector.yaml
 
 control_plane:
-  url: https://connector.retentionops.ca
+  url: https://connector.retentionops.app
   poll_wait_seconds: 30
   heartbeat_seconds: 30
 

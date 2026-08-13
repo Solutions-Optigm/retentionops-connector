@@ -217,7 +217,7 @@ func runConnector(ctx context.Context, arguments []string) error {
 func runEnroll(ctx context.Context, arguments []string) error {
 	set := flag.NewFlagSet("enroll", flag.ContinueOnError)
 	path := configFlag(set)
-	url := set.String("url", "", "control-plane base URL, for example https://connector.retentionops.ca")
+	url := set.String("url", "", "control-plane base URL, for example https://connector.retentionops.app")
 	organization := set.String("organization", "", "organization UUID shown in the console")
 	tokenFile := set.String("token-file", "", "private file containing the single-use enrollment token")
 	ifNeeded := set.Bool("if-needed", false, "reuse a valid local identity without contacting the control plane")

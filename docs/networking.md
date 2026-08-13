@@ -6,7 +6,7 @@
 
 | Destination | Port | Why |
 |---|---|---|
-| `connector.retentionops.ca` | 443/tcp | The only RetentionOps endpoint |
+| `connector.retentionops.app` | 443/tcp | The only RetentionOps endpoint |
 | Your PostgreSQL host | 5432/tcp | The target |
 | Your secret manager | 443/tcp | Only if using `aws-secrets-manager` |
 
@@ -46,7 +46,7 @@ If your egress proxy terminates TLS, give the connector the bundle it should tru
 
 ```yaml
 control_plane:
-  url: https://connector.retentionops.ca
+  url: https://connector.retentionops.app
   ca_file: /etc/retentionops/certs/corporate-root.pem
 ```
 
@@ -61,7 +61,7 @@ either direction.
 
 ## Egress allow-lists
 
-If you allow-list by hostname, `connector.retentionops.ca` is sufficient. If you must allow-list
+If you allow-list by hostname, `connector.retentionops.app` is sufficient. If you must allow-list
 by address, ask support@optigm.ca for the current ranges rather than resolving the name once —
 they change.
 

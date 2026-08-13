@@ -19,7 +19,7 @@ command, or a remote edit to this configuration file.
 
 You need:
 
-- a Linux host that can reach your PostgreSQL primary and `connector.retentionops.ca` over HTTPS;
+- a Linux host that can reach your PostgreSQL primary and `connector.retentionops.app` over HTTPS;
 - an organisation UUID and a single-use enrollment token issued by your RetentionOps organisation
   administrator;
 - a data-source UUID issued by the control plane;
@@ -32,7 +32,7 @@ give it only the egress it needs:
 
 | From the connector | Destination | Port | Required for |
 |---|---|---:|---|
-| Connector host | `connector.retentionops.ca` | 443/tcp | Enrollment, polling, heartbeats and evidence |
+| Connector host | `connector.retentionops.app` | 443/tcp | Enrollment, polling, heartbeats and evidence |
 | Connector host | PostgreSQL primary | 5432/tcp | Source checks and retention operations |
 | Connector host | Secret manager | 443/tcp | Only when using AWS Secrets Manager |
 
@@ -76,6 +76,19 @@ the default; `require` encrypts the connection but does not authenticate the ser
 ## 3. Install a verified binary
 
 ### Official release
+
+Releases are published at
+<https://github.com/Solutions-Optigm/retentionops-connector/releases>. Download the binary for your
+architecture together with the checksum manifest and its Sigstore material:
+
+```bash
+arch=$(uname -m); case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
+base=https://github.com/Solutions-Optigm/retentionops-connector/releases/latest/download
+curl -fsSLO $base/retentionops-connector-linux-$arch
+curl -fsSLO $base/retentionops-connector-linux-$arch.sig
+curl -fsSLO $base/retentionops-connector-linux-$arch.pem
+curl -fsSLO $base/checksums.txt
+```
 
 Before installing an official binary or image, verify its checksum and Sigstore signature as
 described in [releases.md](releases.md). For an image, verify it first and deploy its immutable
@@ -149,7 +162,7 @@ credential files:
 
 ```yaml
 control_plane:
-  url: https://connector.retentionops.ca
+  url: https://connector.retentionops.app
   poll_wait_seconds: 30
   heartbeat_seconds: 30
 
@@ -243,7 +256,7 @@ public key in the identity directory.
 ```bash
 sudo -u retentionops retentionops-connector enroll \
   --config /etc/retentionops/connector.yaml \
-  --url https://connector.retentionops.ca \
+  --url https://connector.retentionops.app \
   --organization YOUR_ORGANIZATION_UUID \
   --token-file ./enrollment-token
 ```
