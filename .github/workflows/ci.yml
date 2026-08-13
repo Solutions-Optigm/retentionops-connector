@@ -42,26 +42,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: No shell, process or filesystem execution anywhere
-        run: |
-          ! grep -rn --include='*.go' -E 'os/exec|syscall\.Exec|plugin\.Open' . \
-            || (echo "this component must never execute anything" && exit 1)
-      - name: SQL lives only in the PostgreSQL adapter
-        run: |
-          offenders=$(grep -rln --include='*.go' \
-            -E '(^|[^[:alnum:]_])(SELECT|DELETE FROM|INSERT INTO|UPDATE)[[:space:]]' . \
-            | grep -v '^./adapters/postgres/' \
-            | grep -v '_test.go$' || true)
-          test -z "$offenders" || (echo "SQL outside adapters/postgres: $offenders" && exit 1)
-      - name: The operation set has not grown without a schema change
-        run: |
-          jq -e '.["$defs"].operation.enum == [
-            "POSTGRES_TEST_CONNECTION",
-            "POSTGRES_DISCOVER",
-            "POSTGRES_COUNT",
-            "POSTGRES_DELETE"
-          ]' protocol/v1/job.schema.json >/dev/null \
-            || (echo "the operation enum changed; this needs an ADR and a security review" && exit 1)
+      - name: Containment gates and negative probes
+        run: scripts/verify-containment.sh . --self-test
 
   vulnerabilities:
     runs-on: ubuntu-24.04

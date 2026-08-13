@@ -27,7 +27,7 @@ sha256sum -c checksums.txt --ignore-missing
 cosign verify-blob \
   --certificate retentionops-connector-linux-amd64.pem \
   --signature   retentionops-connector-linux-amd64.sig \
-  --certificate-identity-regexp 'https://github\.com/solutions-optigm/retentionops-connector/\.github/workflows/release\.yml@refs/tags/.*' \
+  --certificate-identity-regexp 'https://github\.com/Solutions-Optigm/retentionops-connector/\.github/workflows/release\.yml@refs/tags/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   retentionops-connector-linux-amd64
 ```
@@ -43,7 +43,7 @@ records which workflow, at which tag, produced the artifact.
 
 ```bash
 cosign verify ghcr.io/solutions-optigm/retentionops-connector:v0.1.0 \
-  --certificate-identity-regexp 'https://github\.com/solutions-optigm/retentionops-connector/.*' \
+  --certificate-identity-regexp 'https://github\.com/Solutions-Optigm/retentionops-connector/\.github/workflows/release\.yml@refs/tags/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
