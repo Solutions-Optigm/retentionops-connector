@@ -12,7 +12,7 @@ retentionops-connector v0.1.0
 ├── checksums.txt
 ├── sbom.cdx.json                     CycloneDX inventory
 ├── *.sig, *.pem                      Sigstore signatures and certificates for every artifact
-└── ghcr.io/solutions-optigm/retentionops-connector:0.1.0
+└── ghcr.io/solutions-optigm/retentionops-connector:v0.1.0
 ```
 
 Official builds are produced only by Solutions Optigm inc. A build you compiled yourself from this
@@ -42,7 +42,7 @@ records which workflow, at which tag, produced the artifact.
 ## Verify the image, then pin it
 
 ```bash
-cosign verify ghcr.io/solutions-optigm/retentionops-connector:0.1.0 \
+cosign verify ghcr.io/solutions-optigm/retentionops-connector:v0.1.0 \
   --certificate-identity-regexp 'https://github\.com/solutions-optigm/retentionops-connector/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
