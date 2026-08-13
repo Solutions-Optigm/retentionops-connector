@@ -151,10 +151,22 @@
               "name": { "type": "string", "maxLength": 63 },
               "type": { "type": "string", "maxLength": 64 },
               "nullable": { "type": "boolean" },
-              "primary_key": { "type": "boolean" }
+              "primary_key": { "type": "boolean" },
+              "references": { "$ref": "#/$defs/reference" }
             }
           }
         }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "description": "The far end of a foreign key the database itself declares. Three identifiers, never a constraint name and never a value. Both ends are always inside the schemas the customer allow-listed: a reference is dropped rather than reported when its target sits outside that perimeter, so discovery cannot disclose the existence of a table the customer did not put in scope.",
+      "additionalProperties": false,
+      "required": ["schema", "table", "column"],
+      "properties": {
+        "schema": { "type": "string", "maxLength": 63 },
+        "table": { "type": "string", "maxLength": 63 },
+        "column": { "type": "string", "maxLength": 63 }
       }
     }
   }

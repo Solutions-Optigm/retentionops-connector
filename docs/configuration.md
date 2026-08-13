@@ -73,7 +73,7 @@ always the visible consequence of someone editing this file on your host.
 
 | Field | Notes |
 |---|---|
-| `allowed_schemas` | Required, non-empty. Also bounds what discovery reports. |
+| `allowed_schemas` | Required, non-empty. Also bounds what discovery reports — including both ends of a foreign key, so a relationship leaving this list is dropped rather than reported. |
 | `require_approval` | `true` refuses any destructive job without a valid human approval, independently of what the control plane believes. |
 | `drift` | Customer-owned maximum recount tolerance. Defaults to the conservative bounded policy below. |
 | `max_delete_rows` | Source-wide row ceiling. |

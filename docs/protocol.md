@@ -111,6 +111,27 @@ A conforming connector performs these in order and stops at the first failure:
 The signature is checked before the nonce is consumed, so an unsigned flood cannot fill a
 connector's replay ledger with entries that would then refuse the control plane's real jobs.
 
+## What discovery reports
+
+`POSTGRES_DISCOVER` returns structure: for each table in an allow-listed schema, its name, a row
+estimate, and for each column a name, a type, nullability, primary-key membership, and — when the
+database declares one — the schema, table and column a foreign key points at.
+
+Two properties of that last member are worth stating, because they are enforced rather than
+promised:
+
+- **Both ends stay inside `allowed_schemas`.** A key whose target lives in a schema you did not
+  allow-list is dropped, not reported. Naming that table would disclose that it exists, which is
+  the disclosure allow-listing a schema exists to prevent.
+- **Nothing is inferred.** A column called `customer_id` with no declared constraint produces no
+  relationship. The connector reports what `pg_constraint` holds and never what a name suggests.
+
+The constraint's own name is not reported. A composite key is reported as one reference per
+column pair, paired as the database stores them.
+
+There is still no member anywhere in the result able to hold a row, a column value, a key or a
+credential. See [`result.schema.json`](../protocol/v1/result.schema.json).
+
 ## Refusal and failure codes
 
 Stable, never translated. A refusal is a `DENIED` result carrying a `denial_code`; an operational

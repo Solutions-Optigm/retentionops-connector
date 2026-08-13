@@ -231,7 +231,9 @@ sudo -u retentionops retentionops-connector source discover --config /etc/retent
 ```
 
 `source test` validates TCP reachability, TLS and both configured roles. `source discover`
-discovers only the locally allow-listed schemas; it never returns row content.
+discovers only the locally allow-listed schemas; it never returns row content. It reports table
+and column structure plus the foreign keys the database declares between allow-listed schemas —
+never a relationship guessed from a column name.
 
 Enroll once with the organisation UUID and one-time token supplied by the control plane. Treat the
 token as sensitive: do not put it in tickets, terminal recordings, shell history exports or

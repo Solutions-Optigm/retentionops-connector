@@ -257,6 +257,48 @@ const discoverStatement = `SELECT c.table_schema,
                             WHERE c.table_schema::text = ANY($1::text[])
                             ORDER BY c.table_schema, c.table_name, c.ordinal_position`
 
+// referenceStatement lists the foreign keys declared between allow-listed schemas.
+//
+// It reads pg_catalog rather than information_schema.referential_constraints because only the
+// catalogue preserves the pairing of a composite key. information_schema exposes the two sides
+// through separate views with no shared ordinal, so a two-column key there yields four plausible
+// pairs and no way to tell which two are real. unnest(conkey, confkey) WITH ORDINALITY walks both
+// arrays in step, which is the pairing the database itself stores.
+//
+// Both ends are filtered to the allow-listed schemas. A key pointing out of the perimeter is not
+// reported at all: naming a table the customer deliberately left out of scope would disclose its
+// existence, which is precisely what allow-listing a schema is meant to prevent.
+const referenceStatement = `SELECT source_namespace.nspname,
+                                   source_relation.relname,
+                                   source_attribute.attname,
+                                   target_namespace.nspname,
+                                   target_relation.relname,
+                                   target_attribute.attname
+                              FROM pg_constraint constraint_row
+                              JOIN pg_class source_relation
+                                ON source_relation.oid = constraint_row.conrelid
+                              JOIN pg_namespace source_namespace
+                                ON source_namespace.oid = source_relation.relnamespace
+                              JOIN pg_class target_relation
+                                ON target_relation.oid = constraint_row.confrelid
+                              JOIN pg_namespace target_namespace
+                                ON target_namespace.oid = target_relation.relnamespace
+                              JOIN LATERAL unnest(constraint_row.conkey, constraint_row.confkey)
+                                        WITH ORDINALITY AS key_pair(source_attnum, target_attnum, ordinality)
+                                ON true
+                              JOIN pg_attribute source_attribute
+                                ON source_attribute.attrelid = source_relation.oid
+                               AND source_attribute.attnum = key_pair.source_attnum
+                              JOIN pg_attribute target_attribute
+                                ON target_attribute.attrelid = target_relation.oid
+                               AND target_attribute.attnum = key_pair.target_attnum
+                             WHERE constraint_row.contype = 'f'
+                               AND source_namespace.nspname::text = ANY($1::text[])
+                               AND target_namespace.nspname::text = ANY($1::text[])
+                             ORDER BY source_namespace.nspname,
+                                      source_relation.relname,
+                                      key_pair.ordinality`
+
 // versionStatement is the only thing a connection test reads.
 //
 // pg_stat_ssl is consulted rather than the server's `ssl` setting: the question is whether *this

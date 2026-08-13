@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,6 +25,7 @@ func TestEveryStatementBindsItsValueRatherThanRenderingIt(t *testing.T) {
 		count,
 		deletion,
 		discoverStatement,
+		referenceStatement,
 		sizeStatement,
 		versionStatement,
 	}
@@ -135,6 +137,61 @@ func TestTheConnectionStringNeverCarriesAPassword(t *testing.T) {
 		if !strings.Contains(built, expected) {
 			t.Fatalf("expected %s in %s", expected, built)
 		}
+	}
+}
+
+func TestForeignKeyDiscoveryStaysInsideTheAllowListedPerimeter(t *testing.T) {
+	// One bound parameter, applied to both ends. A key whose target sits in a schema the customer
+	// did not allow-list must not be reported at all: naming that table would disclose that it
+	// exists, which is the disclosure allow-listing a schema exists to prevent.
+	if strings.Count(referenceStatement, "$1") != 2 {
+		t.Fatalf("both ends of a foreign key must be filtered by the allow list: %s", referenceStatement)
+	}
+	for _, side := range []string{"source_namespace.nspname::text = ANY($1::text[])", "target_namespace.nspname::text = ANY($1::text[])"} {
+		if !strings.Contains(referenceStatement, side) {
+			t.Fatalf("expected %q in the reference statement", side)
+		}
+	}
+	if !strings.Contains(referenceStatement, "contype = 'f'") {
+		t.Fatal("only foreign keys may be read by this statement")
+	}
+}
+
+func TestACompositeForeignKeyKeepsItsColumnPairing(t *testing.T) {
+	// information_schema exposes the two sides of a key through views with no shared ordinal, so
+	// a two-column key there yields four plausible pairs. Walking conkey and confkey together is
+	// what makes a composite key render as the relationship the database actually stores.
+	if !strings.Contains(referenceStatement, "unnest(constraint_row.conkey, constraint_row.confkey)") {
+		t.Fatal("the two key arrays must be walked in step")
+	}
+	if !strings.Contains(referenceStatement, "WITH ORDINALITY") {
+		t.Fatal("the pairing depends on ordinality")
+	}
+}
+
+func TestDiscoveryReadsStructureAndNeverAValue(t *testing.T) {
+	// Both discovery statements read catalogue relations only. A join onto a customer table would
+	// be the one way structure discovery could start returning content, and naming every source
+	// relation here means adding such a join has to fail this test first.
+	catalogues := map[string][]string{
+		discoverStatement:  {"information_schema.columns", "information_schema.table_constraints", "information_schema.key_column_usage"},
+		referenceStatement: {"pg_constraint", "pg_class", "pg_namespace", "pg_attribute"},
+	}
+	for statement, allowed := range catalogues {
+		for _, keyword := range []string{"FROM", "JOIN"} {
+			for _, fragment := range strings.Split(statement, keyword)[1:] {
+				relation := strings.Fields(strings.TrimSpace(fragment))
+				if len(relation) == 0 || relation[0] == "(" || relation[0] == "LATERAL" {
+					continue
+				}
+				if !slices.Contains(allowed, relation[0]) {
+					t.Fatalf("discovery reads an unexpected relation %q in: %s", relation[0], statement)
+				}
+			}
+		}
+	}
+	if strings.Contains(referenceStatement, "conname") {
+		t.Fatal("a constraint name is customer-controlled free text and has no place in the result")
 	}
 }
 

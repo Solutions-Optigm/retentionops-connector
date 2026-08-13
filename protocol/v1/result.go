@@ -66,12 +66,28 @@ const (
 	FailureInternal         FailureCode = "INTERNAL_ERROR"
 )
 
+// Reference is the far end of a declared foreign key: which column this one points at.
+//
+// The constraint's own name is deliberately absent. It is free text the customer chose, it adds
+// nothing a reader of the graph needs, and every customer-controlled string that crosses the
+// boundary is one more string that ends up inside a model prompt.
+type Reference struct {
+	Schema string `json:"schema"`
+	Table  string `json:"table"`
+	Column string `json:"column"`
+}
+
 // Column is table structure. Never a value.
 type Column struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`
 	Nullable   bool   `json:"nullable,omitempty"`
 	PrimaryKey bool   `json:"primary_key,omitempty"`
+	// References is set only when the database itself declares the relationship. Nothing here is
+	// inferred from a naming convention: a graph that mixes declared constraints with plausible
+	// guesses, in a product whose other numbers are signed, teaches the reader to trust the
+	// guesses. A composite key produces one reference per column pair.
+	References *Reference `json:"references,omitempty"`
 }
 
 // Table is what discovery reports: names, types and an estimate. Reading a single row is not an

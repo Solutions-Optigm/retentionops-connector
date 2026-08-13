@@ -199,7 +199,61 @@ func (a *Adapter) Discover(ctx context.Context) (*protocolv1.Statistics, error) 
 	if err := rows.Err(); err != nil {
 		return nil, classify(err)
 	}
+	if err := a.attachReferences(ctx, reader, tables, index); err != nil {
+		return nil, err
+	}
 	return &protocolv1.Statistics{Tables: tables}, nil
+}
+
+// attachReferences fills in the foreign keys the database declares between discovered tables.
+//
+// A reference is attached only when both ends are already in `tables`. That single condition
+// carries two guarantees at once: the target is inside the allow-listed perimeter, and the reader
+// identity was actually able to see it — information_schema filtered the column scan by privilege,
+// while pg_catalog does not filter at all. Anything the reader could not see is simply not a node
+// in this graph, so it cannot become an edge either.
+func (a *Adapter) attachReferences(
+	ctx context.Context,
+	reader *pgx.Conn,
+	tables []protocolv1.Table,
+	index map[string]int,
+) error {
+	rows, err := reader.Query(ctx, referenceStatement, a.source.Safety.AllowedSchemas)
+	if err != nil {
+		return classify(err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sourceSchema, sourceTable, sourceColumn string
+		var targetSchema, targetTable, targetColumn string
+		if err := rows.Scan(
+			&sourceSchema, &sourceTable, &sourceColumn,
+			&targetSchema, &targetTable, &targetColumn,
+		); err != nil {
+			return classify(err)
+		}
+		position, seen := index[sourceSchema+"."+sourceTable]
+		if !seen {
+			continue
+		}
+		if _, seen := index[targetSchema+"."+targetTable]; !seen {
+			continue
+		}
+		for offset := range tables[position].Columns {
+			if tables[position].Columns[offset].Name != sourceColumn {
+				continue
+			}
+			tables[position].Columns[offset].References = &protocolv1.Reference{
+				Schema: targetSchema, Table: targetTable, Column: targetColumn,
+			}
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return classify(err)
+	}
+	return nil
 }
 
 // Count measures the candidate set for a retention predicate.
