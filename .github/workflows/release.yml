@@ -38,6 +38,8 @@ jobs:
           for artifact in \
             dist/retentionops-connector-linux-amd64 \
             dist/retentionops-connector-linux-arm64 \
+            dist/retentionops-connector-linux-amd64.deb \
+            dist/retentionops-connector-linux-arm64.deb \
             dist/checksums.txt \
             dist/sbom.cdx.json; do
             cosign sign-blob --yes \
@@ -51,6 +53,7 @@ jobs:
           subject-path: |
             dist/retentionops-connector-linux-amd64
             dist/retentionops-connector-linux-arm64
+            dist/retentionops-connector-linux-*.deb
             dist/checksums.txt
             dist/sbom.cdx.json
 

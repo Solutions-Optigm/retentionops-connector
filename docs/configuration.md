@@ -39,6 +39,7 @@ The key is the data source UUID the console issued when you created the source. 
 | Field | Default | Notes |
 |---|---|---|
 | `type` | — | `postgresql` is the only implemented type. |
+| `mode` | inferred for legacy files | `discovery_only` or `execution`. `discovery_only` refuses every delete before resolving an executor secret. |
 | `host`, `database` | — | Required. |
 | `port` | `5432` | |
 | `tls.mode` | `verify-full` | `verify-full`, `verify-ca` or `require`. |
@@ -140,3 +141,18 @@ Check yours before deploying:
 ```bash
 retentionops-connector validate-config --config /etc/retentionops/connector.yaml
 ```
+
+New `init` bundles always start with `mode: discovery_only`, no executor credential and no table
+granting `delete`. To enable execution, generate a separate local review bundle:
+
+```bash
+retentionops-connector execution enable \
+  --config /etc/retentionops/connector.yaml \
+  --source 4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52 \
+  --table application.audit_logs:created_at
+```
+
+Review its `roles.sql`, apply that SQL as the DBA, then run `execution apply
+--database-role-applied`. The executor password is masked by default; unattended operation may
+use `--executor-secret-file`. The live local policy is backed up and changed only at that final
+explicit step.

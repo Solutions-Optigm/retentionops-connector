@@ -25,6 +25,13 @@ const (
 	TLSVerifyFull = "verify-full"
 	TLSVerifyCA   = "verify-ca"
 	TLSRequire    = "require"
+
+	// SourceModeDiscoveryOnly keeps the connector useful for connection tests and schema
+	// discovery without configuring any destructive identity. SourceModeExecution is a local,
+	// customer-owned opt-in and is never writable by the control plane.
+	SourceModeDiscoveryOnly = "discovery_only"
+	SourceModeExecution     = "execution"
+	ExecutionDisabledCode   = "EXECUTION_DISABLED"
 )
 
 // SecretRef names where a credential lives. It is a reference, never a value: a password
@@ -55,6 +62,7 @@ type TLS struct {
 // hand an attacker the destructive identity, because that identity was never fetched.
 type Source struct {
 	Type     string        `yaml:"type"`
+	Mode     string        `yaml:"mode,omitempty"`
 	Host     string        `yaml:"host"`
 	Port     int           `yaml:"port"`
 	Database string        `yaml:"database"`
@@ -147,6 +155,15 @@ func (c *Config) applyDefaults() {
 			// so, in writing, in a file their own security review can read.
 			source.TLS.Mode = TLSVerifyFull
 		}
+		if source.Mode == "" {
+			// Existing configurations predate the explicit mode. Inferring it from the local
+			// allow-list preserves their behaviour without ever widening a non-destructive file.
+			if source.Safety.GrantsDelete() {
+				source.Mode = SourceModeExecution
+			} else {
+				source.Mode = SourceModeDiscoveryOnly
+			}
+		}
 		if source.Safety.Drift.Mode == "" {
 			source.Safety.Drift = policy.DriftPolicy{
 				Mode:                "bounded",
@@ -212,6 +229,18 @@ func (s *Source) validate(id string) error {
 	}
 	if s.Port < 1 || s.Port > 65535 {
 		return fmt.Errorf("source %s: port %d is out of range", id, s.Port)
+	}
+	switch s.Mode {
+	case SourceModeDiscoveryOnly:
+		if s.Safety.GrantsDelete() {
+			return fmt.Errorf("source %s: mode discovery_only cannot grant delete", id)
+		}
+	case SourceModeExecution:
+		if !s.Safety.GrantsDelete() {
+			return fmt.Errorf("source %s: mode execution needs at least one table granting delete", id)
+		}
+	default:
+		return fmt.Errorf("source %s: mode %q is not one of discovery_only, execution", id, s.Mode)
 	}
 	switch s.TLS.Mode {
 	case TLSVerifyFull, TLSVerifyCA, TLSRequire:

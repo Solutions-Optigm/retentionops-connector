@@ -1,0 +1,11 @@
+Package: retentionops-connector
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Solutions Optigm inc. <security@retentionops.app>
+Homepage: https://github.com/Solutions-Optigm/retentionops-connector
+Depends: systemd
+Description: customer-side data-plane connector for RetentionOps
+ RetentionOps Connector executes a closed set of signed retention operations inside the
+ customer's network. Database credentials and the local safety policy remain on this host.

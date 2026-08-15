@@ -9,6 +9,8 @@ whole design exists to avoid. Verify before you deploy.
 retentionops-connector v0.1.0
 ├── retentionops-connector-linux-amd64
 ├── retentionops-connector-linux-arm64
+├── retentionops-connector-linux-amd64.deb
+├── retentionops-connector-linux-arm64.deb
 ├── checksums.txt
 ├── sbom.cdx.json                     CycloneDX inventory
 ├── *.sig, *.pem                      Sigstore signatures and certificates for every artifact
@@ -33,8 +35,9 @@ cosign verify-blob \
 ```
 
 Apply the same command to `checksums.txt` and `sbom.cdx.json` with their matching certificate and
-signature. GitHub also publishes build provenance attestations for both binaries, the checksum
-manifest and the SBOM. The OCI image carries its own BuildKit provenance and SBOM attestations.
+signature. Apply it to the `.deb` before installing it. GitHub also publishes build provenance
+attestations for both binaries, both packages, the checksum manifest and the SBOM. The OCI image
+carries its own BuildKit provenance and SBOM attestations.
 
 Keyless signing: there is no long-lived private key to steal, and the certificate identity
 records which workflow, at which tag, produced the artifact.

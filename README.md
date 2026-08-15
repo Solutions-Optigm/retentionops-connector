@@ -61,31 +61,23 @@ no representation anywhere in the protocol: [`secrets/`](secrets/).
 ## Quick start
 
 ```bash
-# 1. Install the binary (or use ghcr.io/solutions-optigm/retentionops-connector)
-make build
+# 1. Install the verified .deb (or use the signed OCI image)
+sudo apt install ./retentionops-connector-linux-amd64.deb
 
 # 2. Generate a private, reviewable installation bundle (the console supplies both IDs)
 retentionops-connector init --platform systemd \
   --source 4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52 \
+  --organization 3f2b9c14-8e1a-4b6d-9a7c-2d5e0f183b44 \
   --control-plane https://connector.retentionops.app
 
 # For automation, use the strict reference-only schema in examples/postgres/init.answers.yaml
 retentionops-connector init --answers-file examples/postgres/init.answers.yaml
 
-# Review and install the generated files, then validate locally
-retentionops-connector validate-config --config ./retentionops-connector-init/connector.yaml
+# 3. Review connector.yaml, roles.sql and bundle.json, then run the resumable assistant
+sudo retentionops-connector install --bundle "$PWD/retentionops-connector-init"
 
-# 3. Enrol, with the one-time token from the RetentionOps console
-retentionops-connector enroll \
-  --url https://connector.retentionops.app \
-  --organization 3f2b9c14-8e1a-4b6d-9a7c-2d5e0f183b44 \
-  --token-file ./enrollment-token
-
-# 4. Check everything before you start it
-retentionops-connector doctor
-
-# 5. Run it
-retentionops-connector run
+# 4. Activate only after the assistant has completed source checks, enrollment and doctor
+sudo systemctl enable --now retentionops-connector
 ```
 
 `doctor` walks the same code paths the running connector does, in the order a packet would meet
@@ -176,12 +168,13 @@ Full reference: [`docs/configuration.md`](docs/configuration.md).
 
 ## Building
 
-Go 1.25 or later. Two dependencies: a PostgreSQL driver and a YAML parser.
+Go 1.25 or later. Three direct dependencies: a PostgreSQL driver, a YAML parser and the standard
+Go terminal helper used for masked input.
 
 ```bash
 make deps    # resolve the module graph (writes go.sum)
 make check   # gofmt + go vet + go test -race
-make dist    # reproducible binaries for linux/amd64 and linux/arm64 + checksums
+make dist    # reproducible binaries and Debian packages for amd64/arm64 + checksums
 ```
 
 ## Contributing

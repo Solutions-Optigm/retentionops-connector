@@ -7,6 +7,9 @@ package initializer
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -26,10 +29,13 @@ import (
 
 const (
 	// AnswersVersion is bumped whenever an answers file would otherwise change meaning.
-	AnswersVersion  = 1
+	AnswersVersion  = 2
+	BundleVersion   = 1
 	PlatformSystemd = "systemd"
 	PlatformCompose = "compose"
 )
+
+var uuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Runtime locations the generated artifacts agree on. The bundle is a staging directory; every
 // command in NEXT-STEPS.txt points at the path the running connector will actually read.
@@ -46,6 +52,7 @@ type Answers struct {
 	Version         int          `yaml:"version"`
 	Platform        string       `yaml:"platform"`
 	OutputDirectory string       `yaml:"output_directory"`
+	OrganizationID  string       `yaml:"organization_id"`
 	SourceID        string       `yaml:"source_id"`
 	ControlPlane    ControlPlane `yaml:"control_plane"`
 	Source          Source       `yaml:"source"`
@@ -57,13 +64,37 @@ type ControlPlane struct {
 }
 
 type Source struct {
-	Host           string            `yaml:"host"`
-	Port           int               `yaml:"port"`
-	Database       string            `yaml:"database"`
-	TLSCAFile      string            `yaml:"tls_ca_file"`
-	Reader         config.Credential `yaml:"reader"`
-	Executor       config.Credential `yaml:"executor"`
+	Host            string            `yaml:"host"`
+	Port            int               `yaml:"port"`
+	Database        string            `yaml:"database"`
+	TLSCASourceFile string            `yaml:"tls_ca_source_file"`
+	TLSCAFile       string            `yaml:"tls_ca_file,omitempty"`
+	Reader          config.Credential `yaml:"reader"`
+	// Executor remains accepted for v1 answers-file compatibility. New bundles deliberately
+	// omit it until a local operator enables destructive execution.
+	Executor       config.Credential `yaml:"executor,omitempty"`
 	AllowedSchemas []string          `yaml:"allowed_schemas"`
+}
+
+// BundleManifest is the machine-readable handoff consumed by `install`. It contains deployment
+// shape and file digests only; secrets have no representation in this document.
+type BundleManifest struct {
+	Version         int               `json:"version"`
+	Platform        string            `json:"platform"`
+	OrganizationID  string            `json:"organization_id,omitempty"`
+	SourceID        string            `json:"source_id"`
+	ControlPlaneURL string            `json:"control_plane_url"`
+	RuntimeConfig   string            `json:"runtime_config"`
+	PostgreSQL      BundlePostgreSQL  `json:"postgresql"`
+	Artifacts       map[string]string `json:"artifacts"`
+}
+
+type BundlePostgreSQL struct {
+	Host          string `json:"host"`
+	Port          int    `json:"port"`
+	Database      string `json:"database"`
+	CASourceFile  string `json:"ca_source_file,omitempty"`
+	CARuntimeFile string `json:"ca_runtime_file"`
 }
 
 // LoadAnswers rejects unknown fields and trailing documents. A misspelled safety input must
@@ -78,6 +109,17 @@ func LoadAnswers(path string) (Answers, error) {
 	var answers Answers
 	if err := decoder.Decode(&answers); err != nil {
 		return Answers{}, fmt.Errorf("init: parse answers file: %w", err)
+	}
+	if answers.Version == 1 {
+		// v1 used tls_ca_file solely as a runtime path and generated executor placeholders. It
+		// remains readable so an existing reviewed answers file can be upgraded in place.
+		answers.Version = AnswersVersion
+		if answers.Source.TLSCASourceFile == "" {
+			// A v1 path may already contain the certificate on a configured host. The installer
+			// checks that location or asks for --ca-file during repair; it never guesses another.
+			answers.Source.TLSCASourceFile = answers.Source.TLSCAFile
+		}
+		answers.Source.Executor = config.Credential{}
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
@@ -95,7 +137,8 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 		defaultValue string
 		assign       func(string) error
 	}{
-		{"Output directory", defaultString(initial.OutputDirectory, "./retentionops-connector-init"), func(value string) error { initial.OutputDirectory = value; return nil }},
+		{"Output directory", defaultString(initial.OutputDirectory, defaultOutputDirectory()), func(value string) error { initial.OutputDirectory = value; return nil }},
+		{"Organization UUID", initial.OrganizationID, func(value string) error { initial.OrganizationID = value; return nil }},
 		{"PostgreSQL host", initial.Source.Host, func(value string) error { initial.Source.Host = value; return nil }},
 		{"PostgreSQL port", defaultString(strconv.Itoa(initial.Source.Port), "5432"), func(value string) error {
 			port, err := strconv.Atoi(value)
@@ -106,13 +149,10 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 			return nil
 		}},
 		{"Database", initial.Source.Database, func(value string) error { initial.Source.Database = value; return nil }},
-		{"PostgreSQL CA file (runtime path)", initial.Source.TLSCAFile, func(value string) error { initial.Source.TLSCAFile = value; return nil }},
+		{"PostgreSQL CA certificate (source path)", initial.Source.TLSCASourceFile, func(value string) error { initial.Source.TLSCASourceFile = value; return nil }},
 		{"Reader role", defaultString(initial.Source.Reader.Username, "retentionops_reader"), func(value string) error { initial.Source.Reader.Username = value; return nil }},
 		{"Reader secret provider", defaultString(initial.Source.Reader.Password.Provider, "file"), func(value string) error { initial.Source.Reader.Password.Provider = value; return nil }},
 		{"Reader secret reference", defaultString(initial.Source.Reader.Password.Ref, "/etc/retentionops/secrets/reader-password"), func(value string) error { initial.Source.Reader.Password.Ref = value; return nil }},
-		{"Executor role", defaultString(initial.Source.Executor.Username, "retentionops_executor"), func(value string) error { initial.Source.Executor.Username = value; return nil }},
-		{"Executor secret provider", defaultString(initial.Source.Executor.Password.Provider, "file"), func(value string) error { initial.Source.Executor.Password.Provider = value; return nil }},
-		{"Executor secret reference", defaultString(initial.Source.Executor.Password.Ref, "/etc/retentionops/secrets/executor-password"), func(value string) error { initial.Source.Executor.Password.Ref = value; return nil }},
 		{"Allowed schemas (comma separated)", strings.Join(initial.Source.AllowedSchemas, ","), func(value string) error {
 			initial.Source.AllowedSchemas = splitSchemas(value)
 			return nil
@@ -140,6 +180,14 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 	return initial, nil
 }
 
+func defaultOutputDirectory() string {
+	working, err := os.Getwd()
+	if err == nil && filepath.Base(working) == "retentionops-connector-init" {
+		return "."
+	}
+	return "./retentionops-connector-init"
+}
+
 func defaultString(value, fallback string) string {
 	if value == "" || value == "0" {
 		return fallback
@@ -162,6 +210,9 @@ func splitSchemas(value string) []string {
 // never overwritten: rerunning init may update generated configuration, but cannot erase a
 // secret an operator has already installed.
 func Generate(answers Answers) error {
+	if answers.Source.TLSCAFile == "" {
+		answers.Source.TLSCAFile = "/etc/retentionops/certs/postgres-ca.pem"
+	}
 	configuration, err := buildConfig(answers)
 	if err != nil {
 		return err
@@ -171,6 +222,9 @@ func Generate(answers Answers) error {
 	}
 	if answers.Platform != PlatformSystemd && answers.Platform != PlatformCompose {
 		return fmt.Errorf("init: platform must be systemd or compose")
+	}
+	if answers.OrganizationID != "" && !uuidPattern.MatchString(answers.OrganizationID) {
+		return fmt.Errorf("init: organization_id is not a lowercase UUID")
 	}
 	if answers.OutputDirectory == "" {
 		return fmt.Errorf("init: output_directory is required")
@@ -212,25 +266,130 @@ func Generate(answers Answers) error {
 			return err
 		}
 	}
-	for _, credential := range []config.Credential{answers.Source.Reader, answers.Source.Executor} {
-		if credential.Password.Provider != "file" {
-			continue
-		}
-		name := filepath.Base(filepath.Clean(credential.Password.Ref))
-		if name == "." || name == string(filepath.Separator) {
-			return fmt.Errorf("init: file secret reference %q has no filename", credential.Password.Ref)
-		}
-		if err := createSecretPlaceholder(filepath.Join(output, "secrets", name)); err != nil {
-			return err
-		}
+	manifest := BundleManifest{
+		Version: BundleVersion, Platform: answers.Platform, OrganizationID: answers.OrganizationID,
+		SourceID: answers.SourceID, ControlPlaneURL: answers.ControlPlane.URL,
+		RuntimeConfig: runtimeConfigPath,
+		PostgreSQL: BundlePostgreSQL{
+			Host: answers.Source.Host, Port: answers.Source.Port, Database: answers.Source.Database,
+			CASourceFile: answers.Source.TLSCASourceFile, CARuntimeFile: answers.Source.TLSCAFile,
+		},
+		Artifacts: make(map[string]string, len(artifacts)),
 	}
-	if err := createSecretPlaceholder(filepath.Join(output, "secrets", "enrollment-token")); err != nil {
+	for name, content := range artifacts {
+		digest := sha256.Sum256(content)
+		manifest.Artifacts[name] = "sha256:" + hex.EncodeToString(digest[:])
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("init: render bundle.json: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := writeFile(filepath.Join(output, "bundle.json"), encoded, 0o600); err != nil {
 		return err
 	}
 	return nil
 }
 
-const bundleMarker = ".retentionops-init-v1"
+// LoadBundle verifies the manifest and every generated artifact before an installer trusts it.
+func LoadBundle(directory string) (BundleManifest, string, error) {
+	root, err := filepath.Abs(directory)
+	if err != nil {
+		return BundleManifest{}, "", fmt.Errorf("bundle: resolve directory: %w", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "bundle.json")) //nolint:gosec // operator-supplied bundle
+	if errors.Is(err, os.ErrNotExist) {
+		return loadLegacyBundle(root)
+	}
+	if err != nil {
+		return BundleManifest{}, "", fmt.Errorf("bundle: read bundle.json: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var manifest BundleManifest
+	if err := decoder.Decode(&manifest); err != nil {
+		return BundleManifest{}, "", fmt.Errorf("bundle: parse bundle.json: %w", err)
+	}
+	if manifest.Version != BundleVersion {
+		return BundleManifest{}, "", fmt.Errorf("bundle: version %d is unsupported", manifest.Version)
+	}
+	if manifest.Platform != PlatformSystemd && manifest.Platform != PlatformCompose {
+		return BundleManifest{}, "", fmt.Errorf("bundle: platform %q is unsupported", manifest.Platform)
+	}
+	for name, expected := range manifest.Artifacts {
+		if filepath.Base(name) != name {
+			return BundleManifest{}, "", fmt.Errorf("bundle: artifact %q is not a local filename", name)
+		}
+		content, readErr := os.ReadFile(filepath.Join(root, name)) //nolint:gosec // manifest confines basename
+		if readErr != nil {
+			return BundleManifest{}, "", fmt.Errorf("bundle: read %s: %w", name, readErr)
+		}
+		digest := sha256.Sum256(content)
+		actual := "sha256:" + hex.EncodeToString(digest[:])
+		if actual != expected {
+			return BundleManifest{}, "", fmt.Errorf("bundle: %s digest mismatch", name)
+		}
+	}
+	return manifest, root, nil
+}
+
+// loadLegacyBundle gives v1 init directories one narrow migration path. The marker and strict
+// configuration are required, then the first install records digests in a v1 manifest. Existing
+// identities and runtime files are outside this bundle and are never touched by the migration.
+func loadLegacyBundle(root string) (BundleManifest, string, error) {
+	if _, err := os.Stat(filepath.Join(root, ".retentionops-init-v1")); err != nil {
+		return BundleManifest{}, "", errors.New("bundle: bundle.json is missing and this is not a legacy init bundle")
+	}
+	info, err := os.Stat(root)
+	if err != nil || info.Mode().Perm()&fs.FileMode(0o077) != 0 {
+		return BundleManifest{}, "", errors.New("bundle: legacy init directory must be private")
+	}
+	configuration, err := config.Load(filepath.Join(root, "connector.yaml"))
+	if err != nil {
+		return BundleManifest{}, "", fmt.Errorf("bundle: legacy connector.yaml: %w", err)
+	}
+	if len(configuration.Sources) != 1 {
+		return BundleManifest{}, "", errors.New("bundle: legacy init bundle must contain exactly one source")
+	}
+	platform := PlatformSystemd
+	platformArtifact := "retentionops-connector.service"
+	if _, err := os.Stat(filepath.Join(root, "compose.yaml")); err == nil {
+		platform = PlatformCompose
+		platformArtifact = "compose.yaml"
+	}
+	var sourceID string
+	var source *config.Source
+	for sourceID, source = range configuration.Sources {
+		break
+	}
+	manifest := BundleManifest{
+		Version: BundleVersion, Platform: platform, SourceID: sourceID,
+		ControlPlaneURL: configuration.ControlPlane.URL, RuntimeConfig: runtimeConfigPath,
+		PostgreSQL: BundlePostgreSQL{
+			Host: source.Host, Port: source.Port, Database: source.Database,
+			CARuntimeFile: source.TLS.CAFile,
+		},
+		Artifacts: map[string]string{},
+	}
+	for _, name := range []string{"connector.yaml", "roles.sql", "NEXT-STEPS.txt", platformArtifact} {
+		content, readErr := os.ReadFile(filepath.Join(root, name)) //nolint:gosec // fixed legacy bundle artifact
+		if readErr != nil {
+			return BundleManifest{}, "", fmt.Errorf("bundle: legacy artifact %s: %w", name, readErr)
+		}
+		sum := sha256.Sum256(content)
+		manifest.Artifacts[name] = "sha256:" + hex.EncodeToString(sum[:])
+	}
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return BundleManifest{}, "", err
+	}
+	if err := writeFile(filepath.Join(root, "bundle.json"), append(encoded, '\n'), 0o600); err != nil {
+		return BundleManifest{}, "", fmt.Errorf("bundle: record legacy migration: %w", err)
+	}
+	return manifest, root, nil
+}
+
+const bundleMarker = ".retentionops-init-v2"
 
 func prepareOutputDirectory(output string) error {
 	info, err := os.Stat(output)
@@ -259,7 +418,7 @@ func prepareOutputDirectory(output string) error {
 			}
 		}
 	}
-	return writeFile(filepath.Join(output, bundleMarker), []byte("retentionops connector init bundle v1\n"), 0o600)
+	return writeFile(filepath.Join(output, bundleMarker), []byte("retentionops connector init bundle v2\n"), 0o600)
 }
 
 func buildConfig(answers Answers) (*config.Config, error) {
@@ -273,10 +432,11 @@ func buildConfig(answers Answers) (*config.Config, error) {
 		Telemetry: config.Telemetry{MetricsAddress: "127.0.0.1:9102", LogFormat: "json", LogLevel: "info"},
 		Sources: map[string]*config.Source{
 			answers.SourceID: {
-				Type: "postgresql", Host: answers.Source.Host, Port: answers.Source.Port,
+				Type: "postgresql", Mode: config.SourceModeDiscoveryOnly,
+				Host: answers.Source.Host, Port: answers.Source.Port,
 				Database: answers.Source.Database,
 				TLS:      config.TLS{Mode: config.TLSVerifyFull, CAFile: answers.Source.TLSCAFile},
-				Reader:   answers.Source.Reader, Executor: answers.Source.Executor,
+				Reader:   answers.Source.Reader,
 				Safety: policy.Safety{
 					AllowedSchemas: answers.Source.AllowedSchemas, RequireApproval: true,
 					Drift:         policy.DriftPolicy{Mode: "bounded", ExactMatchBelowRows: 1000, MaxRows: 100, MaxBasisPoints: 50},
@@ -303,34 +463,6 @@ func writeFile(path string, content []byte, mode fs.FileMode) error {
 	return nil
 }
 
-func createSecretPlaceholder(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("init: create secrets directory: %w", err)
-	}
-	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("init: protect secrets directory: %w", err)
-	}
-	if _, err := os.Stat(path); err == nil {
-		if err := os.Chmod(path, 0o400); err != nil {
-			return fmt.Errorf("init: protect secret placeholder: %w", err)
-		}
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("init: inspect secret placeholder: %w", err)
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o400) //nolint:gosec // fixed private mode
-	if err != nil {
-		return fmt.Errorf("init: create secret placeholder: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("init: close secret placeholder: %w", err)
-	}
-	if err := os.Chmod(path, 0o400); err != nil {
-		return fmt.Errorf("init: protect secret placeholder: %w", err)
-	}
-	return nil
-}
-
 // renderNextSteps writes the remaining commands with the paths this bundle actually declares.
 //
 // The generated configuration resolves secrets, the CA certificate and the connector identity at
@@ -338,152 +470,24 @@ func createSecretPlaceholder(path string) error {
 // exist yet either. A guide that skipped those steps would fail on the first `source test`, which
 // is exactly the moment an operator has no way to tell a missing directory from a refusal.
 func renderNextSteps(answers Answers) string {
+	activation := "sudo systemctl enable --now retentionops-connector"
 	if answers.Platform == PlatformCompose {
-		return composeNextSteps(answers)
+		activation = `docker compose -f "$PWD/compose.yaml" up -d`
 	}
-	return systemdNextSteps(answers)
-}
+	return fmt.Sprintf(`RetentionOps connector — reviewed local installation
 
-// stagedCredentials lists the roles whose password init staged as a local file. A role resolved
-// through a secret manager has nothing to fill in and must not be told to write one.
-func stagedCredentials(answers Answers) []string {
-	staged := make([]string, 0, 2)
-	for _, candidate := range []struct {
-		name       string
-		credential config.Credential
-	}{{"reader", answers.Source.Reader}, {"executor", answers.Source.Executor}} {
-		if candidate.credential.Password.Provider == "file" {
-			staged = append(staged, candidate.name)
-		}
-	}
-	return staged
-}
+init did not execute SQL, create a secret, contact RetentionOps, install a service or start one.
+The generated source is discovery-only: no executor credential and no DELETE grant exist.
 
-// fillSecrets keeps the passwords out of shell history and out of process arguments. The staged
-// placeholders are mode 0400, so they are deliberately relaxed and restored around the write.
-func fillSecrets(answers Answers) string {
-	staged := stagedCredentials(answers)
-	if len(staged) == 0 {
-		return "   Both roles resolve their password through the configured secret provider; there is\n   no local file to fill in."
-	}
-	files := make([]string, 0, len(staged))
-	writes := make([]string, 0, len(staged))
-	for _, name := range staged {
-		files = append(files, "secrets/"+name+"-password")
-		writes = append(writes, fmt.Sprintf(
-			`   read -rsp '%s password: ' password && printf '%%s' "$password" > secrets/%s-password && unset password && echo`,
-			name, name))
-	}
-	lines := append([]string{"   chmod 0600 " + strings.Join(files, " ")}, writes...)
-	return strings.Join(append(lines, "   chmod 0400 "+strings.Join(files, " ")), "\n")
-}
+1. Review connector.yaml, roles.sql and bundle.json.
+2. Enter this bundle directory and run the resumable local assistant:
+   sudo retentionops-connector install --bundle "$PWD"
+3. After the assistant reports every check green, perform its one explicit activation command:
+   %s
 
-func systemdNextSteps(answers Answers) string {
-	installed := make([]string, 0, 3)
-	if answers.Source.TLSCAFile != "" {
-		installed = append(installed, fmt.Sprintf(
-			"\n   sudo install -o root -g retentionops -m 0644 YOUR-POSTGRES-CA.pem %s", answers.Source.TLSCAFile))
-	}
-	references := map[string]config.SecretRef{
-		"reader":   answers.Source.Reader.Password,
-		"executor": answers.Source.Executor.Password,
-	}
-	for _, name := range stagedCredentials(answers) {
-		installed = append(installed, fmt.Sprintf(
-			"\n   sudo install -o retentionops -g retentionops -m 0400 secrets/%s-password %s",
-			name, references[name].Ref))
-	}
-	return fmt.Sprintf(`RetentionOps connector — next steps (systemd)
-
-Everything below runs on this host. init executed no SQL, contacted no network and started
-nothing; each command here is yours to review before you run it.
-
-1. Review connector.yaml and roles.sql. No table is authorized for deletion.
-2. Create the service account and the directories the connector reads and writes:
-   id retentionops >/dev/null 2>&1 || sudo useradd --system --home-dir /var/lib/retentionops --shell /usr/sbin/nologin retentionops
-   sudo install -d -o retentionops -g retentionops -m 0700 %s %s
-   sudo install -d -o root -g retentionops -m 0750 /etc/retentionops /etc/retentionops/certs /etc/retentionops/secrets
-3. Create the database roles yourself; init never executes SQL. psql prompts for both passwords:
-   psql "postgresql://ADMIN_ROLE@%s:%d/%s" -f roles.sql
-4. Write the same two passwords into the staged secret files:
-%s
-5. Install the configuration, the CA certificate and the secrets at the paths connector.yaml
-   declares — the connector reads them there, not from this directory:
-   sudo install -o root -g retentionops -m 0640 connector.yaml /etc/retentionops/connector.yaml%s
-6. sudo -u retentionops retentionops-connector validate-config --config %s
-7. sudo -u retentionops retentionops-connector source test --config %s %s
-8. sudo -u retentionops retentionops-connector source discover --config %s %s
-9. Request a single-use enrollment token in the console, then save it where the service account
-   can read it once. Paste it into the second command and end with Ctrl-D; a token typed as an
-   argument would survive in shell history:
-   sudo install -o retentionops -g retentionops -m 0400 /dev/null /etc/retentionops/secrets/enrollment-token
-   sudo sh -c 'cat > /etc/retentionops/secrets/enrollment-token'
-10. sudo -u retentionops retentionops-connector enroll --config %s --url %s --organization ORGANIZATION_UUID --token-file /etc/retentionops/secrets/enrollment-token
-11. sudo rm -f /etc/retentionops/secrets/enrollment-token
-12. sudo -u retentionops retentionops-connector doctor --config %s
-13. Start the supervised service:
-   sudo install -o root -g root -m 0644 retentionops-connector.service /etc/systemd/system/retentionops-connector.service
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now retentionops-connector
-   sudo systemctl status retentionops-connector
-
-The connector has not contacted RetentionOps and no service has been installed or started.
-`,
-		identityDirectory, stateDirectory,
-		answers.Source.Host, answers.Source.Port, answers.Source.Database,
-		fillSecrets(answers),
-		strings.Join(installed, ""),
-		runtimeConfigPath,
-		runtimeConfigPath, answers.SourceID,
-		runtimeConfigPath, answers.SourceID,
-		runtimeConfigPath, answers.ControlPlane.URL,
-		runtimeConfigPath)
-}
-
-func composeNextSteps(answers Answers) string {
-	steps := []string{
-		"Review connector.yaml and roles.sql. No table is authorized for deletion.",
-		fmt.Sprintf(`Create the database roles yourself; init never executes SQL. psql prompts for both passwords:
-   psql "postgresql://ADMIN_ROLE@%s:%d/%s" -f roles.sql`,
-			answers.Source.Host, answers.Source.Port, answers.Source.Database),
-		"Write the same two passwords into the staged secret files:\n" + fillSecrets(answers),
-		fmt.Sprintf(`Verify the image, then pin the digest compose.yaml expects — a tag can be moved, a digest cannot:
-   digest=$(docker buildx imagetools inspect %s:latest --format '{{.Manifest.Digest}}')
-   sed -i "s|@sha256:REPLACE_WITH_VERIFIED_DIGEST|@${digest}|" compose.yaml`, imageRepository),
-		`Attach the connector to the network that reaches PostgreSQL. compose.yaml expects an
-   existing network named "database"; rename it there, or create it:
-   docker network create database`,
-	}
-	if answers.Source.TLSCAFile != "" {
-		steps = append(steps, fmt.Sprintf(
-			"Copy your PostgreSQL CA certificate to certs/%s; compose.yaml mounts it read-only at %s.",
-			filepath.Base(filepath.Clean(answers.Source.TLSCAFile)), answers.Source.TLSCAFile))
-	}
-	steps = append(steps,
-		fmt.Sprintf("docker compose run --rm connector validate-config --config %s", runtimeConfigPath),
-		fmt.Sprintf("docker compose run --rm connector source test --config %s %s", runtimeConfigPath, answers.SourceID),
-		fmt.Sprintf("docker compose run --rm connector source discover --config %s %s", runtimeConfigPath, answers.SourceID),
-		`Request a single-use enrollment token in the console and save it to secrets/enrollment-token
-   (chmod 0600 to write it, chmod 0400 afterwards).`,
-		fmt.Sprintf(`docker compose run --rm -v "$PWD/secrets/enrollment-token:/run/enrollment-token:ro" connector \
-      enroll --config %s --url %s --organization ORGANIZATION_UUID --token-file /run/enrollment-token`,
-			runtimeConfigPath, answers.ControlPlane.URL),
-		fmt.Sprintf("docker compose run --rm connector doctor --config %s", runtimeConfigPath),
-		"docker compose up -d",
-	)
-	numbered := make([]string, 0, len(steps))
-	for index, step := range steps {
-		numbered = append(numbered, fmt.Sprintf("%d. %s", index+1, step))
-	}
-	return fmt.Sprintf(`RetentionOps connector — next steps (Docker Compose)
-
-Everything below runs in this directory. init executed no SQL, contacted no network and started
-nothing; each command here is yours to review before you run it.
-
-%s
-
-The connector has not contacted RetentionOps and no service has been installed or started.
-`, strings.Join(numbered, "\n"))
+The assistant prints the exact DBA command for %s:%d/%s. It never emits a password, token,
+generic host placeholder or command containing a secret.
+`, activation, answers.Source.Host, answers.Source.Port, answers.Source.Database)
 }
 
 const systemdUnit = `[Unit]
@@ -495,19 +499,30 @@ Wants=network-online.target
 Type=exec
 User=retentionops
 Group=retentionops
-ExecStart=/usr/local/bin/retentionops-connector run --config /etc/retentionops/connector.yaml
+ExecStart=/usr/bin/retentionops-connector run --config /etc/retentionops/connector.yaml
 Restart=on-failure
 RestartSec=5s
 StateDirectory=retentionops
 StateDirectoryMode=0700
+ReadWritePaths=/var/lib/retentionops
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
 RestrictSUIDSGID=yes
 RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
 MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
 
@@ -516,37 +531,6 @@ WantedBy=multi-user.target
 `
 
 func renderCompose(answers Answers) string {
-	secretMounts := make([]string, 0, 2)
-	secretDefinitions := make([]string, 0, 2)
-	for name, credential := range map[string]config.Credential{"reader": answers.Source.Reader, "executor": answers.Source.Executor} {
-		if credential.Password.Provider != "file" {
-			continue
-		}
-		filename := filepath.Base(filepath.Clean(credential.Password.Ref))
-		secretMounts = append(secretMounts, fmt.Sprintf("      - source: postgres_%s_password\n        target: %s\n        mode: 0400", name, credential.Password.Ref))
-		secretDefinitions = append(secretDefinitions, fmt.Sprintf("  postgres_%s_password:\n    file: ./secrets/%s", name, filename))
-	}
-	slices.Sort(secretMounts)
-	slices.Sort(secretDefinitions)
-	// The configuration pins TLS verify-full against a CA file the container cannot see unless
-	// this file mounts it. Without the mount the first source check fails on a missing file, and
-	// the obvious workaround — weakening TLS — is the one an operator must never be nudged into.
-	certificates := make([]string, 0, 2)
-	for _, authority := range []string{answers.Source.TLSCAFile, answers.ControlPlane.CAFile} {
-		if authority == "" {
-			continue
-		}
-		certificates = append(certificates, fmt.Sprintf("\n      - ./certs/%s:%s:ro",
-			filepath.Base(filepath.Clean(authority)), authority))
-	}
-	slices.Sort(certificates)
-	certificates = slices.Compact(certificates)
-	secretsBlock := ""
-	serviceSecrets := ""
-	if len(secretMounts) > 0 {
-		serviceSecrets = "\n    secrets:\n" + strings.Join(secretMounts, "\n")
-		secretsBlock = "\nsecrets:\n" + strings.Join(secretDefinitions, "\n") + "\n"
-	}
 	return fmt.Sprintf(`services:
   connector:
     image: %s@sha256:REPLACE_WITH_VERIFIED_DIGEST
@@ -557,18 +541,18 @@ func renderCompose(answers Answers) string {
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     volumes:
-      - ./connector.yaml:%s:ro%s
-      - state:/var/lib/retentionops
-    networks: [egress, database]%s
-
-volumes:
-  state:
+      - ./connector.yaml:%s:ro
+      - ./runtime/certs/postgres-ca.pem:%s:ro
+      - ./runtime/secrets/reader-password:%s:ro
+      - ./runtime/identity:/var/lib/retentionops/identity
+      - ./runtime/state:/var/lib/retentionops/state
+    networks: [egress, database]
 
 networks:
   egress:
   database:
     external: true
-%s`, imageRepository, runtimeConfigPath, runtimeConfigPath, strings.Join(certificates, ""), serviceSecrets, secretsBlock)
+`, imageRepository, runtimeConfigPath, runtimeConfigPath, answers.Source.TLSCAFile, answers.Source.Reader.Password.Ref)
 }
 
 // ValidateControlPlaneFlag provides a fast error before prompting while Config.Validate remains

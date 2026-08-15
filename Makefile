@@ -4,7 +4,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 BINARY  := retentionops-connector
 PLATFORMS := linux/amd64 linux/arm64
 
-.PHONY: help deps build test lint vet fmt check dist sbom clean
+.PHONY: help deps build test lint vet fmt check dist binaries deb checksums sbom clean
 
 help:
 	@echo "deps    resolve and pin the module graph (writes go.sum)"
@@ -38,7 +38,9 @@ check:
 
 # Reproducible: -trimpath removes local paths, CGO_ENABLED=0 removes the host toolchain, and
 # the version is the only build-time input. Two builds of one tag produce identical bytes.
-dist:
+dist: binaries deb checksums
+
+binaries:
 	@mkdir -p dist
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
@@ -46,7 +48,20 @@ dist:
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath \
 			-ldflags "$(LDFLAGS)" -o dist/$(BINARY)-$$os-$$arch ./cmd/$(BINARY); \
 	done
-	@cd dist && shasum -a 256 $(BINARY)-* > checksums.txt && cat checksums.txt
+
+deb: binaries
+	@for arch in amd64 arm64; do \
+		go run ./cmd/retentionops-deb \
+			--version "$(VERSION)" --arch "$$arch" \
+			--binary dist/$(BINARY)-linux-$$arch \
+			--output dist/$(BINARY)-linux-$$arch.deb; \
+	done
+
+checksums:
+	@cd dist && shasum -a 256 \
+		$(BINARY)-linux-amd64 $(BINARY)-linux-arm64 \
+		$(BINARY)-linux-amd64.deb $(BINARY)-linux-arm64.deb \
+		> checksums.txt && cat checksums.txt
 
 sbom:
 	@mkdir -p dist

@@ -268,11 +268,43 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, signe
 		return nil, ErrNoWork
 	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
 	default:
-		return nil, fmt.Errorf("controlplane: %s %s answered HTTP %d", method, path, response.StatusCode)
+		return nil, responseError(response, method, path)
 	}
 	// Bounded read: a control plane that has been replaced by something hostile must not be able
 	// to exhaust this process's memory with an unbounded body.
 	return io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+}
+
+func responseError(response *http.Response, method, path string) error {
+	// Only expose the stable machine code. The remote message and details are deliberately not
+	// propagated because an upstream proxy or future handler could reflect request secrets there.
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+	if err == nil {
+		var envelope struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(body, &envelope) == nil && validErrorCode(envelope.Error.Code) {
+			return fmt.Errorf(
+				"controlplane: %s %s answered HTTP %d (%s)",
+				method, path, response.StatusCode, envelope.Error.Code,
+			)
+		}
+	}
+	return fmt.Errorf("controlplane: %s %s answered HTTP %d", method, path, response.StatusCode)
+}
+
+func validErrorCode(code string) bool {
+	if code == "" || len(code) > 80 {
+		return false
+	}
+	for _, character := range code {
+		if (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) sign(request *http.Request, method, path string, body []byte) error {

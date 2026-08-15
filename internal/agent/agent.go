@@ -190,6 +190,18 @@ func (a *Agent) handle(ctx context.Context, raw []byte) {
 		a.metrics.Inc("retentionops_connector_denials_total", map[string]string{"code": string(protocolv1.DeniedUnknownSource)})
 		return
 	}
+	if job.Operation == protocolv1.OpDelete && source.Mode == config.SourceModeDiscoveryOnly {
+		// EXECUTION_DISABLED is deliberately local detail. The wire protocol keeps its reviewed
+		// v1 denial vocabulary and carries DENIED_BY_LOCAL_POLICY rather than growing a fifth
+		// remotely addressable capability for an installation concern.
+		a.log.Warn("job refused because local execution is disabled",
+			"job_id", job.JobID, "operation", job.Operation, "reason_code", config.ExecutionDisabledCode)
+		a.report(ctx, job, func() (protocolv1.JobResult, error) {
+			return a.builder.Refusal(job, protocolv1.DeniedByLocalPolicy, startedAt, a.identity)
+		})
+		a.metrics.Inc("retentionops_connector_denials_total", map[string]string{"code": string(protocolv1.DeniedByLocalPolicy)})
+		return
+	}
 
 	decision := source.Safety.Authorize(job, time.Now())
 	if !decision.Allowed {

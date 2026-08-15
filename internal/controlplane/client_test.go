@@ -29,6 +29,64 @@ func TestAcceptNoContent(t *testing.T) {
 	}
 }
 
+func TestControlPlaneErrorExposesOnlyTheStableCode(t *testing.T) {
+	t.Parallel()
+
+	client, err := New("https://control.invalid", "", "test", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"error":{"code":"ENROLLMENT_TOKEN_INVALID","message":"secret token was rtc_sensitive"}}`,
+			)),
+			Request: request,
+		}, nil
+	})
+
+	_, err = client.do(context.Background(), http.MethodPost, "/connector/v1/enroll", nil, false)
+	if err == nil {
+		t.Fatal("HTTP 400 must fail")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "HTTP 400 (ENROLLMENT_TOKEN_INVALID)") {
+		t.Fatalf("stable error code is missing: %q", message)
+	}
+	if strings.Contains(message, "rtc_sensitive") || strings.Contains(message, "secret token") {
+		t.Fatalf("remote error details leaked: %q", message)
+	}
+}
+
+func TestControlPlaneErrorRejectsUnsafeCode(t *testing.T) {
+	t.Parallel()
+
+	client, err := New("https://control.invalid", "", "test", nil, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.http.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"error":{"code":"INVALID\nrtc_sensitive","message":"must stay hidden"}}`,
+			)),
+			Request: request,
+		}, nil
+	})
+
+	_, err = client.do(context.Background(), http.MethodPost, "/connector/v1/enroll", nil, false)
+	if err == nil {
+		t.Fatal("HTTP 400 must fail")
+	}
+	if got, want := err.Error(), "controlplane: POST /connector/v1/enroll answered HTTP 400"; got != want {
+		t.Fatalf("unsafe remote response was not hidden: got %q, want %q", got, want)
+	}
+}
+
 func TestControlVerifiesThePinnedSignatureAndFreshChallenge(t *testing.T) {
 	controlPublic, controlPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

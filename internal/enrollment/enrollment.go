@@ -29,11 +29,11 @@ type Request struct {
 
 // Run performs the enrollment exchange and writes the identity file.
 //
-// The order is deliberate: generate, send the public half, then persist. A failure at any point
-// leaves no half-enrolled state — the operator retries with a fresh token, because the previous
-// one was burned by the control plane the moment it was accepted.
+// The pending private key is persisted before the request and reused on retry. The control plane
+// accepts a consumed token only for that exact public key, so a failure while installing the final
+// identity is resumable without making the token reusable by another party.
 func Run(ctx context.Context, request Request) (*identity.Identity, error) {
-	public, private, err := identity.Generate()
+	attempt, err := identity.LoadOrCreateEnrollmentAttempt(request.Directory, request.OrganizationID)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +46,7 @@ func Run(ctx context.Context, request Request) (*identity.Identity, error) {
 		ProtocolVersion:  protocolv1.Version,
 		OrganizationID:   request.OrganizationID,
 		Token:            request.Token,
-		PublicKey:        identity.EncodePublic(public),
+		PublicKey:        identity.EncodePublic(attempt.PublicKey()),
 		ConnectorVersion: request.Version,
 		Platform:         runtime.GOOS + "/" + runtime.GOARCH,
 	})
@@ -58,12 +58,15 @@ func Run(ctx context.Context, request Request) (*identity.Identity, error) {
 			response.OrganizationID, request.OrganizationID)
 	}
 
-	if err := identity.Save(request.Directory, private, identity.Enrollment{
+	if err := identity.Save(request.Directory, attempt.PrivateKey(), identity.Enrollment{
 		ConnectorID:           response.ConnectorID,
 		OrganizationID:        response.OrganizationID,
 		ControlPlanePublicKey: response.ControlPlanePublicKey,
 		IssuedAt:              response.IssuedAt,
 	}); err != nil {
+		return nil, err
+	}
+	if err := identity.CompleteEnrollmentAttempt(request.Directory); err != nil {
 		return nil, err
 	}
 	if err := config.RequireDirectoryIsPrivate(request.Directory); err != nil {

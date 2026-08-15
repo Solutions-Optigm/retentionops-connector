@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/local/bin/retentionops-connector run --config /etc/retentionops/connector.yaml
+ExecStart=/usr/bin/retentionops-connector run --config /etc/retentionops/connector.yaml
 Restart=on-failure
 RestartSec=5s
 

@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "purge" ]; then
+  # Identity, state, configuration and secrets are customer data. Purge leaves them in place so
+  # removing a package can never silently destroy a connector identity or replay ledger.
+  :
+fi
+
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload
+fi
+exit 0

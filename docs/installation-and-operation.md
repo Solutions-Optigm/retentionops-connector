@@ -73,7 +73,7 @@ separate database operation and is intentionally outside this protocol.
 Use PostgreSQL TLS `verify-full` with the CA that issued the database server certificate. This is
 the default; `require` encrypts the connection but does not authenticate the server.
 
-## 3. Install a verified binary
+## 3. Install a verified package
 
 ### Official release
 
@@ -105,12 +105,17 @@ cosign verify-blob \
   retentionops-connector-linux-amd64
 ```
 
-Install the verified binary under a root-owned directory, for example
-`/usr/local/bin/retentionops-connector`, mode `0755`. Confirm the artifact before proceeding:
+On Debian 13, download and verify `retentionops-connector-linux-amd64.deb` or
+`retentionops-connector-linux-arm64.deb` with the same checksum and Sigstore procedure, then:
 
 ```bash
+sudo apt install ./retentionops-connector-linux-amd64.deb
 retentionops-connector version
 ```
+
+The package creates the service account, private directories and hardened systemd unit. It never
+starts or enables the service. Configuration, source checks, enrollment and a green `doctor` must
+come first.
 
 ### Build from source
 
@@ -126,7 +131,79 @@ make build
 sudo install -o root -g root -m 0755 dist/retentionops-connector /usr/local/bin/retentionops-connector
 ```
 
-## 4. Create local storage and secrets
+## 4. Generate and review the discovery-only bundle
+
+Run the command personalized by the console. `init` asks only for non-sensitive local metadata,
+creates no empty secret file, performs no network request and executes no SQL:
+
+```bash
+retentionops-connector init --platform systemd \
+  --source YOUR_DATA_SOURCE_UUID \
+  --organization YOUR_ORGANIZATION_UUID \
+  --control-plane https://connector.retentionops.app
+```
+
+Provide the PostgreSQL CA certificate's current source path when prompted. The runtime path is
+fixed and recorded separately in `bundle.json`; there is no `YOUR-POSTGRES-CA.pem` placeholder.
+Review `connector.yaml`, `roles.sql` and `bundle.json` before continuing.
+
+## 5. Run the resumable assistant
+
+```bash
+sudo retentionops-connector install --bundle "$PWD/retentionops-connector-init"
+```
+
+The assistant verifies artifact digests and the CA, preserves conflicting existing files, prints
+an exact `psql` command for the configured host and database, waits for the DBA confirmation,
+requests the reader password and enrollment token through masked input, tests and discovers the
+source, enrolls, then runs `doctor`. Its state contains completed step names only—never a password
+or token. After an interruption, run the same command again.
+
+For unattended secret input, use private files rather than arguments or environment variables:
+
+```bash
+sudo retentionops-connector install \
+  --bundle "$PWD/retentionops-connector-init" \
+  --reader-secret-file /secure/reader-password \
+  --token-file /secure/enrollment-token
+```
+
+The initial configuration is explicitly `discovery_only`. It has no executor identity and no
+table granting `delete`.
+
+## 6. Enable execution separately
+
+Only after discovery and local review, prepare an execution-enablement bundle naming every table
+and retention column explicitly:
+
+```bash
+retentionops-connector execution enable \
+  --config /etc/retentionops/connector.yaml \
+  --source YOUR_DATA_SOURCE_UUID \
+  --table public.tickets:closed_at
+```
+
+Review and apply the generated `roles.sql` as DBA. Then apply the reviewed local policy; the
+executor password is requested with terminal echo disabled:
+
+```bash
+sudo retentionops-connector execution apply \
+  --config /etc/retentionops/connector.yaml \
+  --bundle "$PWD/retentionops-execution-enable" \
+  --database-role-applied
+```
+
+Automation may additionally use `--executor-secret-file /secure/executor-password`.
+
+The command refuses if the live policy changed after preparation and backs it up before the
+atomic replacement. Nothing about this local allow-list is sent to or writable by RetentionOps.
+
+## Legacy manual reference
+
+The remaining sections document the individual actions the assistant performs and remain useful
+for audit or recovery. New Debian installations should use the assistant above.
+
+### Create local storage and secrets manually
 
 Run the connector as a dedicated account. The identity directory contains the connector private
 key and must be mode `0700`; the state directory contains the durable anti-replay ledger and must
@@ -154,7 +231,7 @@ sudo install -o retentionops -g retentionops -m 0400 /secure/input/executor-pass
 in process inspection, container metadata and crash dumps. Prefer a protected file or a workload
 identity with AWS Secrets Manager. Never place a literal password in the YAML configuration.
 
-## 5. Write the local safety policy
+### Write the local safety policy manually
 
 Copy [the example configuration](../examples/postgres/connector.yaml) to
 `/etc/retentionops/connector.yaml`, then replace every illustrative value. This example uses local
@@ -230,7 +307,7 @@ Record the printed policy digest in your change record. It is also reported in t
 heartbeat so the control plane can show which local policy was in force, without receiving the
 policy itself.
 
-## 6. Validate the source and enrol
+### Validate the source and enrol manually
 
 Before enrollment, validate the configuration and exercise the same local code paths used in
 production:
@@ -272,17 +349,14 @@ it.
 sudo -u retentionops retentionops-connector doctor --config /etc/retentionops/connector.yaml
 ```
 
-## 7. Run under supervision
+## 7. Activate supervision
 
 ### systemd (recommended on a host)
 
-Copy [the hardened unit](../deploy/systemd/retentionops-connector.service), review the paths, then
-install and start it:
+The Debian package already installed the hardened unit. Start it only after the assistant reports
+success:
 
 ```bash
-sudo install -o root -g root -m 0644 deploy/systemd/retentionops-connector.service \
-  /etc/systemd/system/retentionops-connector.service
-sudo systemctl daemon-reload
 sudo systemctl enable --now retentionops-connector
 sudo systemctl status retentionops-connector
 sudo journalctl -u retentionops-connector -f

@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -25,11 +26,14 @@ import (
 	"github.com/solutions-optigm/retentionops-connector/internal/controlplane"
 	"github.com/solutions-optigm/retentionops-connector/internal/doctor"
 	"github.com/solutions-optigm/retentionops-connector/internal/enrollment"
+	"github.com/solutions-optigm/retentionops-connector/internal/execution"
 	"github.com/solutions-optigm/retentionops-connector/internal/identity"
 	"github.com/solutions-optigm/retentionops-connector/internal/initializer"
+	"github.com/solutions-optigm/retentionops-connector/internal/installer"
 	"github.com/solutions-optigm/retentionops-connector/internal/telemetry"
 	protocolv1 "github.com/solutions-optigm/retentionops-connector/protocol/v1"
 	"github.com/solutions-optigm/retentionops-connector/secrets"
+	"golang.org/x/term"
 )
 
 // version is set at build time with -ldflags "-X main.version=…".
@@ -40,8 +44,11 @@ const defaultConfigPath = "/etc/retentionops/connector.yaml"
 const usage = `retentionops-connector %s — RetentionOps data-plane connector
 
 Usage:
-  retentionops-connector init --platform systemd|compose --source UUID --control-plane HTTPS_URL
+  retentionops-connector init --platform systemd|compose --source UUID --organization UUID --control-plane HTTPS_URL
   retentionops-connector init --answers-file PATH
+  retentionops-connector install --bundle PATH [--repair] [--reader-secret-file PATH] [--token-file PATH]
+  retentionops-connector execution enable --config PATH --source UUID --table schema.table:column
+  retentionops-connector execution apply  --config PATH --bundle PATH --database-role-applied
   retentionops-connector run              [--config PATH]
   retentionops-connector enroll           [--config PATH] [--if-needed] --url URL --organization UUID --token-file PATH
   retentionops-connector validate-config  [--config PATH]
@@ -73,6 +80,10 @@ func run(arguments []string) error {
 	switch arguments[0] {
 	case "init":
 		return runInit(arguments[1:], os.Stdin, os.Stdout)
+	case "install":
+		return runInstall(ctx, arguments[1:], os.Stdin, os.Stdout)
+	case "execution":
+		return runExecution(arguments[1:], os.Stdin, os.Stdout)
 	case "run":
 		return runConnector(ctx, arguments[1:])
 	case "enroll":
@@ -103,6 +114,7 @@ func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
 	set.SetOutput(out)
 	platform := set.String("platform", "", "deployment platform: systemd or compose")
 	sourceID := set.String("source", "", "data source UUID from the console")
+	organizationID := set.String("organization", "", "organization UUID from the console")
 	controlPlane := set.String("control-plane", "", "RetentionsOps HTTPS control-plane URL")
 	answersFile := set.String("answers-file", "", "strict versioned YAML answers file")
 	if err := set.Parse(arguments); err != nil {
@@ -113,7 +125,7 @@ func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
 	}
 	var answers initializer.Answers
 	if *answersFile != "" {
-		if *platform != "" || *sourceID != "" || *controlPlane != "" {
+		if *platform != "" || *sourceID != "" || *organizationID != "" || *controlPlane != "" {
 			return errors.New("--answers-file cannot be combined with interactive installation flags")
 		}
 		loaded, err := initializer.LoadAnswers(*answersFile)
@@ -130,7 +142,7 @@ func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
 		}
 		answers = initializer.Answers{
 			Version: initializer.AnswersVersion, Platform: *platform, SourceID: *sourceID,
-			ControlPlane: initializer.ControlPlane{URL: *controlPlane},
+			OrganizationID: *organizationID, ControlPlane: initializer.ControlPlane{URL: *controlPlane},
 		}
 		var err error
 		answers, err = initializer.Interactive(in, out, answers)
@@ -143,6 +155,160 @@ func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Installation bundle written to %s. No SQL was executed and no network request was made.\n", answers.OutputDirectory)
 	return nil
+}
+
+func runInstall(ctx context.Context, arguments []string, in *os.File, out *os.File) error {
+	set := flag.NewFlagSet("install", flag.ContinueOnError)
+	set.SetOutput(out)
+	bundle := set.String("bundle", "", "private installation bundle written by init")
+	repair := set.Bool("repair", false, "back up and replace conflicting generated runtime files")
+	readerSecretFile := set.String("reader-secret-file", "", "private file containing the PostgreSQL reader password")
+	tokenFile := set.String("token-file", "", "private file containing the single-use enrollment token")
+	organization := set.String("organization", "", "organization UUID for a legacy bundle")
+	caFile := set.String("ca-file", "", "PostgreSQL CA source path for a legacy bundle")
+	nonInteractive := set.Bool("non-interactive", false, "require every sensitive input through a private file")
+	databaseRoleApplied := set.Bool("database-role-applied", false, "confirm reviewed roles.sql was already applied")
+	if err := set.Parse(arguments); err != nil {
+		return err
+	}
+	if *bundle == "" || set.NArg() != 0 {
+		return errors.New("install requires --bundle and accepts flags only")
+	}
+	inputs := installer.Inputs{Organization: *organization, CASourceFile: *caFile}
+	if *readerSecretFile != "" {
+		secret, err := readPrivateValue(*readerSecretFile, "reader secret")
+		if err != nil {
+			return err
+		}
+		inputs.ReaderSecret = secret
+	}
+	if *tokenFile != "" {
+		token, err := readPrivateToken(*tokenFile)
+		if err != nil {
+			return err
+		}
+		inputs.Token = token
+	}
+	prompts := installer.Prompts{
+		Secret: func(label string) ([]byte, error) { return readMasked(in, out, label+": ") },
+		Token: func() (string, error) {
+			raw, err := readMasked(in, out, "Single-use enrollment token: ")
+			return strings.TrimSpace(string(raw)), err
+		},
+		Confirm: func(question string) (bool, error) {
+			fmt.Fprintf(out, "%s [y/N]: ", question)
+			answer, err := bufio.NewReader(in).ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				return false, err
+			}
+			answer = strings.ToLower(strings.TrimSpace(answer))
+			return answer == "y" || answer == "yes", nil
+		},
+	}
+	return installer.Run(ctx, installer.Options{
+		Bundle: *bundle, Root: "/", Repair: *repair, NonInteractive: *nonInteractive,
+		Version: version, Inputs: inputs, Prompts: prompts, Out: out,
+		DatabaseRoleApplied: *databaseRoleApplied,
+	})
+}
+
+func readMasked(in *os.File, out io.Writer, prompt string) ([]byte, error) {
+	fmt.Fprint(out, prompt)
+	if term.IsTerminal(int(in.Fd())) {
+		value, err := term.ReadPassword(int(in.Fd()))
+		fmt.Fprintln(out)
+		if err != nil {
+			return nil, err
+		}
+		return value, nil
+	}
+	value, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return []byte(strings.TrimRight(value, "\r\n")), nil
+}
+
+type repeatedFlag []string
+
+func (values *repeatedFlag) String() string { return strings.Join(*values, ",") }
+func (values *repeatedFlag) Set(value string) error {
+	*values = append(*values, value)
+	return nil
+}
+
+func runExecution(arguments []string, in *os.File, out io.Writer) error {
+	if len(arguments) == 0 {
+		return errors.New("execution requires an action: enable or apply")
+	}
+	switch arguments[0] {
+	case "enable":
+		set := flag.NewFlagSet("execution enable", flag.ContinueOnError)
+		set.SetOutput(out)
+		path := configFlag(set)
+		sourceID := set.String("source", "", "data source UUID")
+		executorRole := set.String("executor-role", "retentionops_executor", "PostgreSQL executor role")
+		executorRef := set.String("executor-secret-ref", "/etc/retentionops/secrets/executor-password", "runtime secret reference")
+		output := set.String("output", "./retentionops-execution-enable", "private review bundle")
+		maxRows := set.Int("max-delete-rows", 10_000, "local maximum rows per approved execution")
+		maxBatch := set.Int("max-batch-size", 250, "local maximum batch size")
+		var rawTables repeatedFlag
+		set.Var(&rawTables, "table", "repeatable schema.table:retention_column allow-list entry")
+		if err := set.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if set.NArg() != 0 || *sourceID == "" {
+			return errors.New("execution enable requires --source and accepts flags only")
+		}
+		tables := make([]execution.Table, 0, len(rawTables))
+		for _, raw := range rawTables {
+			table, err := execution.ParseTable(raw)
+			if err != nil {
+				return fmt.Errorf("execution enable: --table %q: %w", raw, err)
+			}
+			tables = append(tables, table)
+		}
+		if err := execution.Prepare(execution.PrepareOptions{
+			ConfigPath: *path, SourceID: *sourceID, ExecutorRole: *executorRole,
+			ExecutorSecretRef: *executorRef, Tables: tables, MaxDeleteRows: *maxRows,
+			MaxBatchSize: *maxBatch, OutputDirectory: *output,
+		}); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "Execution-enablement review bundle written to %s. No SQL was executed and the live policy was not changed.\n", *output)
+		return nil
+	case "apply":
+		set := flag.NewFlagSet("execution apply", flag.ContinueOnError)
+		set.SetOutput(out)
+		path := configFlag(set)
+		bundle := set.String("bundle", "", "reviewed execution-enablement bundle")
+		secretFile := set.String("executor-secret-file", "", "private file containing the executor password")
+		databaseRoleApplied := set.Bool("database-role-applied", false, "confirm reviewed roles.sql was applied by the DBA")
+		if err := set.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if set.NArg() != 0 || *bundle == "" {
+			return errors.New("execution apply requires --bundle and accepts flags only")
+		}
+		if !*databaseRoleApplied {
+			return errors.New("execution apply requires --database-role-applied after the DBA successfully applies the reviewed roles.sql")
+		}
+		options := execution.ApplyOptions{ConfigPath: *path, Bundle: *bundle, ExecutorSecretFile: *secretFile}
+		if *secretFile == "" {
+			secret, err := readMasked(in, out, "PostgreSQL executor password: ")
+			if err != nil {
+				return err
+			}
+			options.ExecutorSecret = secret
+		}
+		if err := execution.Apply(options); err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "Execution enabled in the local policy. Run doctor, then restart the supervised connector only after the executor identity passes.")
+		return nil
+	default:
+		return fmt.Errorf("unknown execution action %q", arguments[0])
+	}
 }
 
 func joinNames() string {
@@ -267,25 +433,33 @@ func runEnroll(ctx context.Context, arguments []string) error {
 }
 
 func readPrivateToken(path string) (string, error) {
-	info, err := os.Stat(path)
+	raw, err := readPrivateValue(path, "enrollment token")
 	if err != nil {
-		return "", fmt.Errorf("enrollment token file: %w", err)
-	}
-	if mode := info.Mode().Perm(); mode&fs.FileMode(0o077) != 0 {
-		return "", fmt.Errorf("enrollment token file is mode %#o; it must not be accessible by group or other", mode)
-	}
-	raw, err := os.ReadFile(path) //nolint:gosec // explicit operator-supplied private file
-	if err != nil {
-		return "", fmt.Errorf("enrollment token file: %w", err)
-	}
-	if len(raw) > 4096 {
-		return "", errors.New("enrollment token file is unexpectedly large")
+		return "", err
 	}
 	token := strings.TrimSpace(string(raw))
 	if token == "" {
 		return "", errors.New("enrollment token file is empty")
 	}
 	return token, nil
+}
+
+func readPrivateValue(path, label string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s file: %w", label, err)
+	}
+	if mode := info.Mode().Perm(); mode&fs.FileMode(0o077) != 0 {
+		return nil, fmt.Errorf("%s file is mode %#o; it must not be accessible by group or other", label, mode)
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // explicit operator-supplied private file
+	if err != nil {
+		return nil, fmt.Errorf("%s file: %w", label, err)
+	}
+	if len(raw) > 64*1024 {
+		return nil, fmt.Errorf("%s file is unexpectedly large", label)
+	}
+	return raw, nil
 }
 
 func runValidate(arguments []string) error {

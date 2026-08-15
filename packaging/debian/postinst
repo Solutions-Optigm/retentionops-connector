@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+systemd-sysusers /usr/lib/sysusers.d/retentionops-connector.conf
+systemd-tmpfiles --create /usr/lib/tmpfiles.d/retentionops-connector.conf
+
+if [ -d /run/systemd/system ]; then
+  systemctl daemon-reload
+fi
+
+# Configuration, enrollment and an explicit doctor pass must happen before activation. Package
+# installation therefore never enables or starts the service.
+exit 0

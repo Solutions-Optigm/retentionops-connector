@@ -29,6 +29,7 @@ sources:
   # The key is the data source UUID the RetentionOps console issued. Copy it exactly.
   4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52:
     type: postgresql
+    mode: execution
     host: db.production.internal
     port: 5432
     database: production
