@@ -134,13 +134,14 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 	reader := bufio.NewReader(in)
 	questions := []struct {
 		label        string
+		help         string
 		defaultValue string
 		assign       func(string) error
 	}{
-		{"Output directory", defaultString(initial.OutputDirectory, defaultOutputDirectory()), func(value string) error { initial.OutputDirectory = value; return nil }},
-		{"Organization UUID", initial.OrganizationID, func(value string) error { initial.OrganizationID = value; return nil }},
-		{"PostgreSQL host", initial.Source.Host, func(value string) error { initial.Source.Host = value; return nil }},
-		{"PostgreSQL port", defaultString(strconv.Itoa(initial.Source.Port), "5432"), func(value string) error {
+		{label: "Output directory", defaultValue: defaultString(initial.OutputDirectory, defaultOutputDirectory()), assign: func(value string) error { initial.OutputDirectory = value; return nil }},
+		{label: "Organization UUID", defaultValue: initial.OrganizationID, assign: func(value string) error { initial.OrganizationID = value; return nil }},
+		{label: "PostgreSQL host", defaultValue: initial.Source.Host, assign: func(value string) error { initial.Source.Host = value; return nil }},
+		{label: "PostgreSQL port", defaultValue: defaultString(strconv.Itoa(initial.Source.Port), "5432"), assign: func(value string) error {
 			port, err := strconv.Atoi(value)
 			if err != nil {
 				return fmt.Errorf("port must be an integer")
@@ -148,36 +149,107 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 			initial.Source.Port = port
 			return nil
 		}},
-		{"Database", initial.Source.Database, func(value string) error { initial.Source.Database = value; return nil }},
-		{"PostgreSQL CA certificate (source path)", initial.Source.TLSCASourceFile, func(value string) error { initial.Source.TLSCASourceFile = value; return nil }},
-		{"Reader role", defaultString(initial.Source.Reader.Username, "retentionops_reader"), func(value string) error { initial.Source.Reader.Username = value; return nil }},
-		{"Reader secret provider", defaultString(initial.Source.Reader.Password.Provider, "file"), func(value string) error { initial.Source.Reader.Password.Provider = value; return nil }},
-		{"Reader secret reference", defaultString(initial.Source.Reader.Password.Ref, "/etc/retentionops/secrets/reader-password"), func(value string) error { initial.Source.Reader.Password.Ref = value; return nil }},
-		{"Allowed schemas (comma separated)", strings.Join(initial.Source.AllowedSchemas, ","), func(value string) error {
+		{label: "Database", defaultValue: initial.Source.Database, assign: func(value string) error { initial.Source.Database = value; return nil }},
+		{
+			label: "PostgreSQL CA certificate (source path)",
+			// An operator who does not already know this answer cannot invent it, and pressing
+			// Enter used to be accepted here — the refusal arrived at `install`, one step and
+			// often one machine later, phrased as a missing bundle input. The question now
+			// carries what it is, where it usually already exists, and why it cannot be skipped.
+			help: postgresCAHelp,
+			// Offered, never assumed: the discovered path is shown as the default and can be
+			// replaced. Guessing silently would point verify-full at the wrong authority.
+			defaultValue: defaultString(initial.Source.TLSCASourceFile, discoverPostgresCA()),
+			assign: func(value string) error {
+				if value == "" {
+					return errors.New("required — the connector verifies your database against this certificate before it will hold delete rights on it")
+				}
+				if _, err := os.Stat(value); err != nil {
+					// Not an error: a bundle is often prepared by whoever owns the certificate and
+					// installed by someone else, on another host. Silence would be worse than a
+					// note — a typo and a legitimately remote path look identical here.
+					fmt.Fprintf(out, "  note: not readable on this machine — expected if the bundle is installed elsewhere\n")
+				}
+				initial.Source.TLSCASourceFile = value
+				return nil
+			},
+		},
+		{label: "Reader role", defaultValue: defaultString(initial.Source.Reader.Username, "retentionops_reader"), assign: func(value string) error { initial.Source.Reader.Username = value; return nil }},
+		{label: "Reader secret provider", defaultValue: defaultString(initial.Source.Reader.Password.Provider, "file"), assign: func(value string) error { initial.Source.Reader.Password.Provider = value; return nil }},
+		{label: "Reader secret reference", defaultValue: defaultString(initial.Source.Reader.Password.Ref, "/etc/retentionops/secrets/reader-password"), assign: func(value string) error { initial.Source.Reader.Password.Ref = value; return nil }},
+		{label: "Allowed schemas (comma separated)", defaultValue: strings.Join(initial.Source.AllowedSchemas, ","), assign: func(value string) error {
 			initial.Source.AllowedSchemas = splitSchemas(value)
 			return nil
 		}},
 	}
+questions:
 	for _, question := range questions {
-		if _, err := fmt.Fprintf(out, "%s [%s]: ", question.label, question.defaultValue); err != nil {
-			return Answers{}, err
+		if question.help != "" {
+			if _, err := fmt.Fprintf(out, "\n%s\n", question.help); err != nil {
+				return Answers{}, err
+			}
 		}
-		value, err := reader.ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return Answers{}, fmt.Errorf("init: read answer: %w", err)
-		}
-		value = strings.TrimSpace(value)
-		if value == "" {
-			value = question.defaultValue
-		}
-		if err := question.assign(value); err != nil {
-			return Answers{}, fmt.Errorf("init: %s: %w", question.label, err)
-		}
-		if errors.Is(err, io.EOF) {
+		for {
+			if _, err := fmt.Fprintf(out, "%s [%s]: ", question.label, question.defaultValue); err != nil {
+				return Answers{}, err
+			}
+			value, err := reader.ReadString('\n')
+			if err != nil && !errors.Is(err, io.EOF) {
+				return Answers{}, fmt.Errorf("init: read answer: %w", err)
+			}
+			value = strings.TrimSpace(value)
+			if value == "" {
+				value = question.defaultValue
+			}
+			if assignErr := question.assign(value); assignErr != nil {
+				// A rejected answer is re-asked rather than ending the run: losing nine correct
+				// answers to one typo is what makes an operator paste a value to get past the
+				// prompt. On EOF there is nobody left to re-ask, so the error stands.
+				if errors.Is(err, io.EOF) {
+					return Answers{}, fmt.Errorf("init: %s: %w", question.label, assignErr)
+				}
+				if _, err := fmt.Fprintf(out, "  %v\n", assignErr); err != nil {
+					return Answers{}, err
+				}
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				break questions
+			}
 			break
 		}
 	}
 	return initial, nil
+}
+
+const postgresCAHelp = `The CA certificate that signed your PostgreSQL server's TLS certificate — a path on this
+machine. The connector verifies the server against it on every connection, because it holds
+delete rights on your data and an unverified connection is one somebody can stand in the
+middle of. Usually already present as ssl_ca_file in postgresql.conf, as ~/.postgresql/root.crt,
+or as /etc/ssl/certs/ca-certificates.crt if the server uses a publicly trusted certificate.`
+
+// discoverPostgresCA returns the first conventional location that exists, most specific first.
+// The system bundle is last: it is the right answer only for a publicly trusted server
+// certificate, and offering it ahead of a private CA would quietly widen who is trusted.
+func discoverPostgresCA() string {
+	candidates := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".postgresql", "root.crt"))
+	}
+	matches, err := filepath.Glob("/etc/postgresql/*/main/root.crt")
+	if err == nil {
+		candidates = append(candidates, matches...)
+	}
+	candidates = append(candidates,
+		"/var/lib/postgresql/.postgresql/root.crt",
+		"/etc/ssl/certs/ca-certificates.crt",
+	)
+	for _, candidate := range candidates {
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func defaultOutputDirectory() string {

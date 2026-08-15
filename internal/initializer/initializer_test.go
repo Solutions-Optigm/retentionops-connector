@@ -240,3 +240,60 @@ func readBytes(t *testing.T, path string) []byte {
 	}
 	return raw
 }
+
+func TestInteractiveRefusesAnEmptyCertificateAndAsksAgain(t *testing.T) {
+	// Pressing Enter here used to be accepted, and `install` refused the bundle afterwards —
+	// one step later, often on a different machine, naming a bundle input rather than the
+	// question that produced it. The refusal belongs where the answer is given.
+	seed := validAnswers(t.TempDir(), PlatformSystemd)
+	seed.Source = Source{}
+	certificate := filepath.Join(t.TempDir(), "postgres-ca.pem")
+	if err := os.WriteFile(certificate, []byte("-----BEGIN CERTIFICATE-----\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transcript := &bytes.Buffer{}
+
+	answers, err := Interactive(strings.NewReader(strings.Join([]string{
+		seed.OutputDirectory, seed.OrganizationID, "postgres.internal", "5432", "application",
+		"", // the operator who does not know what to enter
+		certificate,
+		"retentionops_reader", "file", "/etc/retentionops/secrets/reader-password", "application",
+	}, "\n")+"\n"), transcript, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if answers.Source.TLSCASourceFile != certificate {
+		t.Fatalf("certificate = %q, want %q", answers.Source.TLSCASourceFile, certificate)
+	}
+	if !strings.Contains(transcript.String(), "required") {
+		t.Fatal("an empty answer was accepted without saying the certificate is required")
+	}
+	if !strings.Contains(transcript.String(), "postgresql.conf") {
+		t.Fatal("the question does not say where the certificate usually already exists")
+	}
+}
+
+func TestInteractiveNotesACertificateThatIsNotReadableHere(t *testing.T) {
+	// A bundle is routinely prepared by whoever owns the certificate and installed by someone
+	// else. A remote path must stay accepted, but silence would make a typo indistinguishable.
+	seed := validAnswers(t.TempDir(), PlatformSystemd)
+	seed.Source = Source{}
+	transcript := &bytes.Buffer{}
+
+	answers, err := Interactive(strings.NewReader(strings.Join([]string{
+		seed.OutputDirectory, seed.OrganizationID, "postgres.internal", "5432", "application",
+		"/secure/postgres/ca.crt",
+		"retentionops_reader", "file", "/etc/retentionops/secrets/reader-password", "application",
+	}, "\n")+"\n"), transcript, seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if answers.Source.TLSCASourceFile != "/secure/postgres/ca.crt" {
+		t.Fatalf("a path absent from this machine was not kept: %q", answers.Source.TLSCASourceFile)
+	}
+	if !strings.Contains(transcript.String(), "not readable on this machine") {
+		t.Fatal("an unreadable certificate path produced no note")
+	}
+}
