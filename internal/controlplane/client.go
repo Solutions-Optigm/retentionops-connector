@@ -233,6 +233,42 @@ func (c *Client) Heartbeat(ctx context.Context, heartbeat protocolv1.Heartbeat) 
 	return acceptNoContent(err)
 }
 
+// PendingConfigurations collects every sealed source configuration awaiting this connector.
+//
+// The documents are opaque here: this client relays them to the code that holds the key. Decoding
+// them into anything richer would be putting a customer's connection details through a layer that
+// has no reason to see them.
+func (c *Client) PendingConfigurations(ctx context.Context) ([]json.RawMessage, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/connector/v1/configurations/pending", nil, true)
+	if errors.Is(err, ErrNoWork) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var document struct {
+		Configurations []json.RawMessage `json:"configurations"`
+	}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, fmt.Errorf("controlplane: decode pending configurations: %w", err)
+	}
+	return document.Configurations, nil
+}
+
+// AcknowledgeConfiguration reports what became of one envelope.
+//
+// The outcome is a stable code. The connector's own error text can name a host, and it stays in
+// the local log where the customer already has that information.
+func (c *Client) AcknowledgeConfiguration(ctx context.Context, envelopeID, outcome string) error {
+	body, err := json.Marshal(map[string]string{"outcome": outcome})
+	if err != nil {
+		return fmt.Errorf("controlplane: encode acknowledgement: %w", err)
+	}
+	_, err = c.do(ctx, http.MethodPost,
+		"/connector/v1/configurations/"+url.PathEscape(envelopeID)+"/ack", body, true)
+	return acceptNoContent(err)
+}
+
 func acceptNoContent(err error) error {
 	if errors.Is(err, ErrNoWork) {
 		return nil

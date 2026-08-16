@@ -369,7 +369,7 @@ func runConnector(ctx context.Context, arguments []string) error {
 		}()
 	}
 
-	connector, err := agent.New(configuration, id, client, secrets.Default(), metrics, log, version)
+	connector, err := agent.New(configuration, id, client, secrets.Default(), metrics, log, version, *path)
 	if err != nil {
 		return err
 	}

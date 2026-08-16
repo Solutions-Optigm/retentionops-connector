@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/solutions-optigm/retentionops-connector/internal/evidence"
 	"github.com/solutions-optigm/retentionops-connector/internal/identity"
 	"github.com/solutions-optigm/retentionops-connector/internal/jobs"
+	"github.com/solutions-optigm/retentionops-connector/internal/sealedconfig"
 	"github.com/solutions-optigm/retentionops-connector/internal/telemetry"
 	protocolv1 "github.com/solutions-optigm/retentionops-connector/protocol/v1"
 	"github.com/solutions-optigm/retentionops-connector/secrets"
@@ -43,6 +45,8 @@ type Agent struct {
 	control      func(context.Context, string) (*protocolv1.ExecutionControl, error)
 	event        func(context.Context, protocolv1.JobEvent) error
 	controlRetry time.Duration
+	configPath   string
+	configLedger *sealedconfig.Ledger
 }
 
 // New assembles a connector from an already-validated configuration and an enrolled identity.
@@ -54,8 +58,15 @@ func New(
 	metrics *telemetry.Metrics,
 	log *slog.Logger,
 	version string,
+	configPath string,
 ) (*Agent, error) {
 	ledger, err := jobs.NewReplayLedger(config.NoncesDirectory(configuration.State.Directory), nonceRetention)
+	if err != nil {
+		return nil, err
+	}
+	configLedger, err := sealedconfig.NewLedger(
+		filepath.Join(configuration.State.Directory, "sealed-configurations"),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +93,8 @@ func New(
 		control:      client.Control,
 		event:        client.Event,
 		controlRetry: time.Second,
+		configPath:   configPath,
+		configLedger: configLedger,
 	}, nil
 }
 
@@ -108,6 +121,11 @@ func (a *Agent) Run(ctx context.Context) error {
 		case errors.Is(err, controlplane.ErrNoWork):
 			a.metrics.Inc("retentionops_connector_control_plane_requests_total", map[string]string{"outcome": "idle"})
 			failures = 0
+			// Applied here rather than from a goroutine, and only while idle. This loop is the
+			// only reader of the source map, so reconfiguring from a second goroutine would be a
+			// data race on a process holding delete rights -- and reconfiguring a source midway
+			// through a job against it would be worse than late.
+			a.applyPendingConfigurations(ctx)
 			continue
 		case err != nil:
 			if ctx.Err() != nil {
