@@ -38,6 +38,11 @@
         ]
       }
     },
+    "encryption_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{43}=$",
+      "description": "Base64 of the 32 raw X25519 public key bytes a console seals a source configuration to (ADR-034). Published here as well as at enrolment so a connector updated in place becomes configurable without being revoked and enrolled again. The control plane records it only when it holds none: an identical key is a no-op, and a different one is refused and surfaced rather than swapped in, because a correctly signed heartbeat is not authority to invalidate every envelope sealed to the previous key."
+    },
     "policy_digest": {
       "$ref": "#/$defs/digest",
       "description": "Digest of the local safety policy in force. A change is visible to the customer in the console; nothing in the control plane can cause one."

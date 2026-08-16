@@ -514,6 +514,15 @@ func (a *Agent) sendHeartbeat(ctx context.Context) {
 			AllowedTables: source.Safety.AllowedTableCount(),
 		})
 	}
+	// Derived, never read from disk, so a heartbeat cannot publish a key the identity does not
+	// actually hold. A derivation failure is logged and the heartbeat still goes out: liveness is
+	// what this message is for, and losing it would report an outage that is not happening.
+	sealingKey := ""
+	if key, err := a.identity.EncryptionKey(); err != nil {
+		a.log.Warn("sealing key unavailable", "error", err)
+	} else {
+		sealingKey = identity.EncodePublicEncryption(key.PublicKey())
+	}
 	heartbeat := protocolv1.Heartbeat{
 		ProtocolVersion:  protocolv1.Version,
 		OrganizationID:   a.identity.OrganizationID,
@@ -522,6 +531,7 @@ func (a *Agent) sendHeartbeat(ctx context.Context) {
 		OccurredAt:       time.Now().UTC(),
 		Platform:         runtime.GOOS + "/" + runtime.GOARCH,
 		Capabilities:     protocolv1.Operations,
+		EncryptionKey:    sealingKey,
 		PolicyDigest:     a.builder.PolicyDigest,
 		Sources:          sources,
 	}

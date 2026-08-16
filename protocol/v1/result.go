@@ -228,15 +228,20 @@ const (
 
 // Heartbeat announces liveness and the connector's self-declared shape.
 type Heartbeat struct {
-	ProtocolVersion  string         `json:"protocol_version"`
-	OrganizationID   string         `json:"organization_id"`
-	ConnectorID      string         `json:"connector_id"`
-	ConnectorVersion string         `json:"connector_version"`
-	OccurredAt       time.Time      `json:"occurred_at"`
-	Platform         string         `json:"platform,omitempty"`
-	Capabilities     []Operation    `json:"capabilities"`
-	PolicyDigest     string         `json:"policy_digest"`
-	Sources          []SourceStatus `json:"sources,omitempty"`
+	ProtocolVersion  string      `json:"protocol_version"`
+	OrganizationID   string      `json:"organization_id"`
+	ConnectorID      string      `json:"connector_id"`
+	ConnectorVersion string      `json:"connector_version"`
+	OccurredAt       time.Time   `json:"occurred_at"`
+	Platform         string      `json:"platform,omitempty"`
+	Capabilities     []Operation `json:"capabilities"`
+	// EncryptionKey lets a connector updated in place become configurable from the console
+	// without being revoked and enrolled again (ADR-034). Sent on every heartbeat because the
+	// connector cannot know whether the control plane already has it; recording it is the
+	// control plane's decision, and it only ever records a key it does not already hold.
+	EncryptionKey string         `json:"encryption_key,omitempty"`
+	PolicyDigest  string         `json:"policy_digest"`
+	Sources       []SourceStatus `json:"sources,omitempty"`
 }
 
 // EnrollmentRequest carries the public half of a key pair generated on the customer's host.
