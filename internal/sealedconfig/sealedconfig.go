@@ -69,15 +69,19 @@ type Envelope struct {
 	Ciphertext     string `json:"ciphertext"`
 }
 
-// SourceConfiguration is the sealed payload: where to connect and as whom, never a secret.
+// SourceConfiguration is the sealed payload: where to connect and as whom.
+//
+// Never a secret, and never a permission. There is no member for allowed schemas, allowed tables
+// or an execution mode, because those are the local safety policy — which the control plane may
+// not read and may not widen (I32, rule 8). An envelope proposes where to connect; what may be
+// touched there stays a decision taken on the host, by whoever owns it.
 type SourceConfiguration struct {
-	Host           string   `json:"host"`
-	Port           int      `json:"port"`
-	Database       string   `json:"database"`
-	ReaderRole     string   `json:"reader_role"`
-	ExecutorRole   string   `json:"executor_role,omitempty"`
-	TLSMode        string   `json:"tls_mode"`
-	AllowedSchemas []string `json:"allowed_schemas,omitempty"`
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	Database     string `json:"database"`
+	ReaderRole   string `json:"reader_role"`
+	ExecutorRole string `json:"executor_role,omitempty"`
+	TLSMode      string `json:"tls_mode"`
 }
 
 // AdditionalData builds the authenticated associated data.

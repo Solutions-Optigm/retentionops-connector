@@ -41,7 +41,6 @@ func configuration() SourceConfiguration {
 	return SourceConfiguration{
 		Host: "postgres.internal", Port: 5432, Database: "application",
 		ReaderRole: "retentionops_reader", TLSMode: "verify-full",
-		AllowedSchemas: []string{"application"},
 	}
 }
 
@@ -297,5 +296,74 @@ func TestOpensAnEnvelopeSealedByTheBrowser(t *testing.T) {
 	}
 	if opened.TLSMode != vector.Configuration.TLSMode || opened.ReaderRole != vector.Configuration.ReaderRole {
 		t.Fatalf("configuration differs: %+v", opened)
+	}
+}
+
+// At-least-once delivery meets an application that must happen once. This is the property the
+// envelope id exists for, and it has to survive a restart -- an in-memory set would not.
+func TestARedeliveredEnvelopeReportsTheFirstOutcomeAndIsNotReapplied(t *testing.T) {
+	directory := t.TempDir()
+	ledger, err := NewLedger(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const envelope = "b7c1d2e3-4f56-4789-a0b1-c2d3e4f56789"
+
+	if _, seen, err := ledger.Outcome(envelope); err != nil || seen {
+		t.Fatalf("an unseen envelope was reported as seen: seen=%v err=%v", seen, err)
+	}
+	if err := ledger.Record(envelope, OutcomeApplied); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh ledger over the same directory is what a restarted connector sees.
+	restarted, err := NewLedger(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, seen, err := restarted.Outcome(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !seen || outcome != OutcomeApplied {
+		t.Fatalf("a restart forgot an applied envelope: seen=%v outcome=%q", seen, outcome)
+	}
+}
+
+// The first answer may already have reached the control plane. A redelivery must not rewrite it.
+func TestAnOutcomeIsWrittenOnceAndNeverRevised(t *testing.T) {
+	ledger, err := NewLedger(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const envelope = "b7c1d2e3-4f56-4789-a0b1-c2d3e4f56789"
+
+	if err := ledger.Record(envelope, OutcomeApplied); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Record(envelope, OutcomeRefusedInvalid); err != nil {
+		t.Fatal(err)
+	}
+	outcome, _, err := ledger.Outcome(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != OutcomeApplied {
+		t.Fatalf("a redelivery revised history: %q", outcome)
+	}
+}
+
+// Two envelope ids differing only in case are different envelopes. On a case-insensitive
+// filesystem, naming entries after the id itself would silently merge them.
+func TestEnvelopesDifferingOnlyInCaseAreDistinctEntries(t *testing.T) {
+	ledger, err := NewLedger(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Record("AAAA-bbbb", OutcomeApplied); err != nil {
+		t.Fatal(err)
+	}
+	if _, seen, err := ledger.Outcome("aaaa-BBBB"); err != nil || seen {
+		t.Fatalf("a different envelope was treated as already applied: seen=%v", seen)
 	}
 }
