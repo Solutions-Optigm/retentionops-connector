@@ -138,6 +138,7 @@ func TestInteractiveAndAnswersFileProduceTheSameArtifacts(t *testing.T) {
 		"5432",
 		fromFile.Source.Database,
 		fromFile.Source.TLSCASourceFile,
+		fromFile.ControlPlane.CASourceFile,
 		fromFile.Source.Reader.Username,
 		fromFile.Source.Reader.Password.Provider,
 		fromFile.Source.Reader.Password.Ref,
@@ -257,6 +258,7 @@ func TestInteractiveRefusesAnEmptyCertificateAndAsksAgain(t *testing.T) {
 		seed.OutputDirectory, seed.OrganizationID, "postgres.internal", "5432", "application",
 		"", // the operator who does not know what to enter
 		certificate,
+		"", // publicly trusted control plane: nothing to supply
 		"retentionops_reader", "file", "/etc/retentionops/secrets/reader-password", "application",
 	}, "\n")+"\n"), transcript, seed)
 	if err != nil {
@@ -284,6 +286,7 @@ func TestInteractiveNotesACertificateThatIsNotReadableHere(t *testing.T) {
 	answers, err := Interactive(strings.NewReader(strings.Join([]string{
 		seed.OutputDirectory, seed.OrganizationID, "postgres.internal", "5432", "application",
 		"/secure/postgres/ca.crt",
+		"", // publicly trusted control plane: nothing to supply
 		"retentionops_reader", "file", "/etc/retentionops/secrets/reader-password", "application",
 	}, "\n")+"\n"), transcript, seed)
 	if err != nil {
@@ -295,5 +298,54 @@ func TestInteractiveNotesACertificateThatIsNotReadableHere(t *testing.T) {
 	}
 	if !strings.Contains(transcript.String(), "not readable on this machine") {
 		t.Fatal("an unreadable certificate path produced no note")
+	}
+}
+
+// A private control plane is the local and self-hosted shape. Carrying its CA in the bundle is
+// what makes `install` reproducible: the alternative is installing the certificate into the
+// host's trust store, which no later command can see, verify or reproduce on the next machine.
+func TestAPrivateControlPlaneCertificateTravelsWithTheBundle(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "bundle")
+	answers := validAnswers(output, PlatformCompose)
+	answers.ControlPlane.CASourceFile = "/secure/control-plane/ca.crt"
+	if err := Generate(answers); err != nil {
+		t.Fatal(err)
+	}
+
+	configuration, err := config.Load(filepath.Join(output, "connector.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.ControlPlane.CAFile != "/etc/retentionops/certs/control-plane-ca.pem" {
+		t.Fatalf("control-plane ca_file = %q", configuration.ControlPlane.CAFile)
+	}
+	compose := read(t, filepath.Join(output, "compose.yaml"))
+	want := "./runtime/certs/control-plane-ca.pem:" + configuration.ControlPlane.CAFile + ":ro"
+	if !strings.Contains(compose, want) {
+		t.Fatalf("compose.yaml does not mount the control-plane CA it pins:\n%s", compose)
+	}
+	manifest := read(t, filepath.Join(output, "bundle.json"))
+	if !strings.Contains(manifest, "/secure/control-plane/ca.crt") {
+		t.Fatal("the bundle manifest does not record where to copy the control-plane CA from")
+	}
+}
+
+// The hosted control plane is publicly trusted. Pinning a file there would make every connector
+// depend on a certificate nobody needs to distribute, and break on the first renewal.
+func TestAPubliclyTrustedControlPlanePinsNoCertificate(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "bundle")
+	if err := Generate(validAnswers(output, PlatformCompose)); err != nil {
+		t.Fatal(err)
+	}
+
+	configuration, err := config.Load(filepath.Join(output, "connector.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.ControlPlane.CAFile != "" {
+		t.Fatalf("an unsupplied control-plane CA became %q", configuration.ControlPlane.CAFile)
+	}
+	if strings.Contains(read(t, filepath.Join(output, "compose.yaml")), "control-plane-ca.pem") {
+		t.Fatal("compose.yaml mounts a control-plane CA that install never writes")
 	}
 }

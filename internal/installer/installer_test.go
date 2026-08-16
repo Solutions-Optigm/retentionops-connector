@@ -169,3 +169,74 @@ func read(t *testing.T, path string) string {
 	}
 	return string(raw)
 }
+
+// Without this the connector reaches a private control plane only on a host whose trust store
+// somebody edited by hand — state no later command can see, verify or reproduce elsewhere, and
+// whose absence surfaces at enrolment as "certificate signed by unknown authority".
+func TestInstallPlacesThePrivateControlPlaneCertificate(t *testing.T) {
+	root := t.TempDir()
+	postgresCA := filepath.Join(root, "postgres-ca.pem")
+	controlPlaneCA := filepath.Join(root, "control-plane-ca.pem")
+	writeTestCA(t, postgresCA)
+	writeTestCA(t, controlPlaneCA)
+	bundle := filepath.Join(root, "bundle")
+	answers := initializer.Answers{
+		Version: initializer.AnswersVersion, Platform: initializer.PlatformSystemd,
+		OutputDirectory: bundle, OrganizationID: testOrganization, SourceID: testSource,
+		ControlPlane: initializer.ControlPlane{
+			URL: "https://connector.retentionops.example", CASourceFile: controlPlaneCA,
+		},
+		Source: initializer.Source{
+			Host: "127.0.0.1", Port: 5432, Database: "retentionops_test",
+			TLSCASourceFile: postgresCA, TLSCAFile: "/etc/retentionops/certs/postgres-ca.pem",
+			Reader: config.Credential{Username: "retentionops_reader", Password: config.SecretRef{
+				Provider: "file", Ref: "/etc/retentionops/secrets/reader-password",
+			}},
+			AllowedSchemas: []string{"public"},
+		},
+	}
+	if err := initializer.Generate(answers); err != nil {
+		t.Fatal(err)
+	}
+
+	installRoot := t.TempDir()
+	err := Run(context.Background(), Options{
+		Bundle: bundle, Root: installRoot, SkipLiveChecks: true, Version: "test",
+		Inputs:  Inputs{ReaderSecret: []byte("reader-secret"), Token: "rtc_one_time_value"},
+		Prompts: Prompts{Confirm: func(string) (bool, error) { return true, nil }},
+		Out:     &strings.Builder{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	installed := rooted(installRoot, "/etc/retentionops/certs/control-plane-ca.pem")
+	assertFile(t, installed, 0o644)
+	if read(t, installed) != read(t, controlPlaneCA) {
+		t.Fatal("installed control-plane CA differs from the reviewed source")
+	}
+	// The two certificates must not be confused for one another: the connector verifies a
+	// different peer with each, and swapping them fails in a way that reads as a network problem.
+	if read(t, installed) == read(t, rooted(installRoot, "/etc/retentionops/certs/postgres-ca.pem")) {
+		t.Fatal("the control-plane and PostgreSQL certificates were installed from the same source")
+	}
+}
+
+// The hosted deployment supplies no certificate and must install none: a stray file would be a
+// pinned trust anchor nobody reviewed and nobody rotates.
+func TestInstallWritesNoControlPlaneCertificateWhenNoneWasSupplied(t *testing.T) {
+	bundle, _ := bundleForTest(t)
+	root := t.TempDir()
+	err := Run(context.Background(), Options{
+		Bundle: bundle, Root: root, SkipLiveChecks: true, Version: "test",
+		Inputs:  Inputs{ReaderSecret: []byte("reader-secret"), Token: "rtc_one_time_value"},
+		Prompts: Prompts{Confirm: func(string) (bool, error) { return true, nil }},
+		Out:     &strings.Builder{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(rooted(root, "/etc/retentionops/certs/control-plane-ca.pem")); !os.IsNotExist(err) {
+		t.Fatal("install pinned a control-plane CA that the bundle never declared")
+	}
+}

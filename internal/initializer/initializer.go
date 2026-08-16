@@ -44,6 +44,10 @@ const (
 	stateDirectory    = "/var/lib/retentionops/state"
 	runtimeConfigPath = "/etc/retentionops/connector.yaml"
 	imageRepository   = "ghcr.io/solutions-optigm/retentionops-connector"
+	// Where a private control-plane CA lands, alongside the PostgreSQL one. Only written when the
+	// operator supplies a certificate; a publicly trusted control plane leaves it absent and the
+	// connector falls back to the host's own roots.
+	controlPlaneCARuntimeFile = "/etc/retentionops/certs/control-plane-ca.pem"
 )
 
 // Answers is the strict, versioned input shared by interactive and unattended initialization.
@@ -58,9 +62,14 @@ type Answers struct {
 	Source          Source       `yaml:"source"`
 }
 
+// ControlPlane carries an optional private CA the same way Source does: a source path the bundle
+// records and `install` copies, and the runtime path the connector reads. Both stay empty for a
+// publicly trusted control plane, which is the production shape — the connector then verifies
+// against the host's roots and there is nothing to distribute.
 type ControlPlane struct {
-	URL    string `yaml:"url"`
-	CAFile string `yaml:"ca_file,omitempty"`
+	URL          string `yaml:"url"`
+	CASourceFile string `yaml:"ca_source_file,omitempty"`
+	CAFile       string `yaml:"ca_file,omitempty"`
 }
 
 type Source struct {
@@ -79,14 +88,16 @@ type Source struct {
 // BundleManifest is the machine-readable handoff consumed by `install`. It contains deployment
 // shape and file digests only; secrets have no representation in this document.
 type BundleManifest struct {
-	Version         int               `json:"version"`
-	Platform        string            `json:"platform"`
-	OrganizationID  string            `json:"organization_id,omitempty"`
-	SourceID        string            `json:"source_id"`
-	ControlPlaneURL string            `json:"control_plane_url"`
-	RuntimeConfig   string            `json:"runtime_config"`
-	PostgreSQL      BundlePostgreSQL  `json:"postgresql"`
-	Artifacts       map[string]string `json:"artifacts"`
+	Version                   int               `json:"version"`
+	Platform                  string            `json:"platform"`
+	OrganizationID            string            `json:"organization_id,omitempty"`
+	SourceID                  string            `json:"source_id"`
+	ControlPlaneURL           string            `json:"control_plane_url"`
+	ControlPlaneCASourceFile  string            `json:"control_plane_ca_source_file,omitempty"`
+	ControlPlaneCARuntimeFile string            `json:"control_plane_ca_runtime_file,omitempty"`
+	RuntimeConfig             string            `json:"runtime_config"`
+	PostgreSQL                BundlePostgreSQL  `json:"postgresql"`
+	Artifacts                 map[string]string `json:"artifacts"`
 }
 
 type BundlePostgreSQL struct {
@@ -174,6 +185,27 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 				return nil
 			},
 		},
+		{
+			label: "Control-plane CA certificate (source path, blank if publicly trusted)",
+			// Blank is the production answer and is offered first, so the common case is one
+			// keystroke. A private control plane without it fails at enrolment with
+			// "certificate signed by unknown authority", which names TLS but not the fix, and
+			// the usual recovery — installing the CA into the host's trust store — makes the
+			// bundle depend on machine state that no later command can see or reproduce.
+			help:         controlPlaneCAHelp,
+			defaultValue: initial.ControlPlane.CASourceFile,
+			assign: func(value string) error {
+				if value == "" {
+					initial.ControlPlane.CASourceFile = ""
+					return nil
+				}
+				if _, err := os.Stat(value); err != nil {
+					fmt.Fprintf(out, "  note: not readable on this machine — expected if the bundle is installed elsewhere\n")
+				}
+				initial.ControlPlane.CASourceFile = value
+				return nil
+			},
+		},
 		{label: "Reader role", defaultValue: defaultString(initial.Source.Reader.Username, "retentionops_reader"), assign: func(value string) error { initial.Source.Reader.Username = value; return nil }},
 		{label: "Reader secret provider", defaultValue: defaultString(initial.Source.Reader.Password.Provider, "file"), assign: func(value string) error { initial.Source.Reader.Password.Provider = value; return nil }},
 		{label: "Reader secret reference", defaultValue: defaultString(initial.Source.Reader.Password.Ref, "/etc/retentionops/secrets/reader-password"), assign: func(value string) error { initial.Source.Reader.Password.Ref = value; return nil }},
@@ -221,6 +253,12 @@ questions:
 	}
 	return initial, nil
 }
+
+const controlPlaneCAHelp = `Leave blank unless the control plane presents a privately signed certificate — a hosted
+RetentionOps control plane is publicly trusted and needs nothing here. Supply a path when it
+does not, typically a self-hosted or local deployment: the certificate is copied into the
+bundle, so the connector carries its own trust instead of depending on what the host's trust
+store happens to contain.`
 
 const postgresCAHelp = `The CA certificate that signed your PostgreSQL server's TLS certificate — a path on this
 machine. The connector verifies the server against it on every connection, because it holds
@@ -285,6 +323,11 @@ func Generate(answers Answers) error {
 	if answers.Source.TLSCAFile == "" {
 		answers.Source.TLSCAFile = "/etc/retentionops/certs/postgres-ca.pem"
 	}
+	// Only when a certificate was supplied: an empty runtime path is what tells the connector to
+	// verify against the host's roots, which is correct for a publicly trusted control plane.
+	if answers.ControlPlane.CASourceFile != "" && answers.ControlPlane.CAFile == "" {
+		answers.ControlPlane.CAFile = controlPlaneCARuntimeFile
+	}
 	configuration, err := buildConfig(answers)
 	if err != nil {
 		return err
@@ -341,7 +384,9 @@ func Generate(answers Answers) error {
 	manifest := BundleManifest{
 		Version: BundleVersion, Platform: answers.Platform, OrganizationID: answers.OrganizationID,
 		SourceID: answers.SourceID, ControlPlaneURL: answers.ControlPlane.URL,
-		RuntimeConfig: runtimeConfigPath,
+		ControlPlaneCASourceFile:  answers.ControlPlane.CASourceFile,
+		ControlPlaneCARuntimeFile: answers.ControlPlane.CAFile,
+		RuntimeConfig:             runtimeConfigPath,
 		PostgreSQL: BundlePostgreSQL{
 			Host: answers.Source.Host, Port: answers.Source.Port, Database: answers.Source.Database,
 			CASourceFile: answers.Source.TLSCASourceFile, CARuntimeFile: answers.Source.TLSCAFile,
@@ -603,6 +648,12 @@ WantedBy=multi-user.target
 `
 
 func renderCompose(answers Answers) string {
+	// Mounted only when one was supplied: an unconditional line would name a file `install` never
+	// writes, and Docker would helpfully create a directory in its place.
+	controlPlaneCA := ""
+	if answers.ControlPlane.CAFile != "" {
+		controlPlaneCA = fmt.Sprintf("\n      - ./runtime/certs/control-plane-ca.pem:%s:ro", answers.ControlPlane.CAFile)
+	}
 	return fmt.Sprintf(`services:
   connector:
     image: %s@sha256:REPLACE_WITH_VERIFIED_DIGEST
@@ -614,7 +665,7 @@ func renderCompose(answers Answers) string {
     security_opt: ["no-new-privileges:true"]
     volumes:
       - ./connector.yaml:%s:ro
-      - ./runtime/certs/postgres-ca.pem:%s:ro
+      - ./runtime/certs/postgres-ca.pem:%s:ro%s
       - ./runtime/secrets/reader-password:%s:ro
       - ./runtime/identity:/var/lib/retentionops/identity
       - ./runtime/state:/var/lib/retentionops/state
@@ -624,7 +675,7 @@ networks:
   egress:
   database:
     external: true
-`, imageRepository, runtimeConfigPath, runtimeConfigPath, answers.Source.TLSCAFile, answers.Source.Reader.Password.Ref)
+`, imageRepository, runtimeConfigPath, runtimeConfigPath, answers.Source.TLSCAFile, controlPlaneCA, answers.Source.Reader.Password.Ref)
 }
 
 // ValidateControlPlaneFlag provides a fast error before prompting while Config.Validate remains

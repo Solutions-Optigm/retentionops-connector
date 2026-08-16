@@ -13,7 +13,13 @@ having no control at all.
 | `url` | — | Required. Must be `https`. Plaintext is refused at load, not warned about. |
 | `poll_wait_seconds` | `30` | How long the control plane may hold a poll open. 1–300. |
 | `heartbeat_seconds` | `30` | 5–3600. |
-| `ca_file` | — | Only for a TLS-inspecting egress proxy. Absent means the system trust store. |
+| `ca_file` | — | A privately signed control plane, or a TLS-inspecting egress proxy. Absent means the system trust store, which is correct for a publicly trusted control plane. |
+
+`init` asks for the certificate and records where to copy it from; `install` places it at
+`/etc/retentionops/certs/control-plane-ca.pem` and the generated `compose.yaml` mounts it. The
+bundle therefore carries its own trust: installing the certificate into the host trust store
+instead would work, but leaves the connector depending on machine state that nothing in the
+bundle records and no later command can verify or reproduce on the next host.
 
 ## `identity` and `state`
 

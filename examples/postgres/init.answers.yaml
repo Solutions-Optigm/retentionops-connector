@@ -7,6 +7,9 @@ organization_id: 3f2b9c14-8e1a-4b6d-9a7c-2d5e0f183b44
 source_id: 4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52
 control_plane:
   url: https://connector.retentionops.app
+  # Only for a privately signed control plane — a self-hosted or local deployment. The hosted
+  # one is publicly trusted, so leaving this out is correct and pins nothing that could expire.
+  # ca_source_file: /secure/control-plane/ca.crt
 source:
   host: db.production.internal
   port: 5432

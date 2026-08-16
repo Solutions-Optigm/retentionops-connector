@@ -285,6 +285,9 @@ func prepareRuntime(options Options, manifest initializer.BundleManifest, bundle
 		} else if err := validateAndInstallCA(caSource, caTarget, options.Repair); err != nil {
 			return err
 		}
+		if err := installControlPlaneCA(manifest, options.Root, options.Repair); err != nil {
+			return err
+		}
 		return chownRuntime(options.Root)
 	}
 
@@ -304,7 +307,36 @@ func prepareRuntime(options Options, manifest initializer.BundleManifest, bundle
 	if caSource == "" {
 		return errors.New("install: PostgreSQL CA source is absent from this bundle; provide --ca-file")
 	}
-	return validateAndInstallCA(caSource, filepath.Join(bundle, "runtime/certs/postgres-ca.pem"), options.Repair)
+	if err := validateAndInstallCA(caSource, filepath.Join(bundle, "runtime/certs/postgres-ca.pem"), options.Repair); err != nil {
+		return err
+	}
+	// compose.yaml mounts this path from the bundle, so it lands beside the PostgreSQL CA rather
+	// than at the absolute runtime path the container will see.
+	return installControlPlaneCAFrom(manifest, filepath.Join(bundle, "runtime/certs/control-plane-ca.pem"), options.Repair)
+}
+
+// installControlPlaneCA is a no-op for a publicly trusted control plane, which records no
+// certificate and verifies against the host's roots.
+func installControlPlaneCA(manifest initializer.BundleManifest, root string, repair bool) error {
+	if manifest.ControlPlaneCARuntimeFile == "" {
+		return nil
+	}
+	return installControlPlaneCAFrom(manifest, rooted(root, manifest.ControlPlaneCARuntimeFile), repair)
+}
+
+func installControlPlaneCAFrom(manifest initializer.BundleManifest, target string, repair bool) error {
+	source := manifest.ControlPlaneCASourceFile
+	if source == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(source) //nolint:gosec // explicit local CA path
+	if err != nil {
+		return fmt.Errorf("install: read control-plane CA %s: %w", source, err)
+	}
+	if !x509.NewCertPool().AppendCertsFromPEM(raw) {
+		return fmt.Errorf("install: control-plane CA %s contains no PEM certificate", source)
+	}
+	return installBytes(raw, target, 0o644, repair)
 }
 
 func preflight(options Options, manifest initializer.BundleManifest, bundle string) error {
