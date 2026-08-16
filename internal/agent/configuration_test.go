@@ -178,3 +178,72 @@ func TestARedeliveredConfigurationIsAcknowledgedButNotReapplied(t *testing.T) {
 		t.Fatalf("a redelivery reported %q instead of already-applied", acknowledged[1])
 	}
 }
+
+// REFUSED has to mean one thing: nothing changed, on disk or in memory. A connector left running
+// a configuration it had just failed to write down would report a refusal an operator cannot act
+// on -- retrying looks pointless, and the running state contradicts the answer.
+func TestAFailedPersistLeavesTheRunningConfigurationUntouched(t *testing.T) {
+	var mutex sync.Mutex
+	var acknowledged []string
+	var envelopeJSON []byte
+
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/configurations/pending"):
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"protocol_version":"1","configurations":[` + string(envelopeJSON) + `]}`))
+		case strings.HasSuffix(request.URL.Path, "/ack"):
+			body, _ := io.ReadAll(request.Body)
+			var document map[string]string
+			_ = json.Unmarshal(body, &document)
+			acknowledged = append(acknowledged, document["outcome"])
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	connector, id, _ := configuredAgent(t, handler)
+	// A path inside a directory that does not exist: the write fails, the rename never happens.
+	connector.configPath = filepath.Join(t.TempDir(), "absent", "connector.yaml")
+
+	key, err := id.EncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	sealed, err := sealedconfig.Seal(
+		sealedconfig.SourceConfiguration{
+			Host: "postgres.internal", Port: 6432, Database: "application",
+			ReaderRole: "retentionops_reader", TLSMode: "verify-full",
+		},
+		key.PublicKey(),
+		sealedconfig.Envelope{
+			EnvelopeID: "c8d2e3f4-5a6b-4789-b0c1-d2e3f4a56789", OrganizationID: testOrganization,
+			SourceID: testSource, ConnectorID: testConnector,
+			IssuedAt: now.Format(time.RFC3339), ExpiresAt: now.Add(time.Hour).Format(time.RFC3339),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutex.Lock()
+	envelopeJSON, err = json.Marshal(sealed)
+	mutex.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	connector.applyPendingConfigurations(context.Background())
+
+	if got := connector.config.Sources[testSource]; got.Host != "old.internal" || got.Port != 5432 {
+		t.Fatalf("a configuration that was never persisted became active: %+v", got)
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
+	if len(acknowledged) != 1 || acknowledged[0] != sealedconfig.OutcomeRefusedInvalid {
+		t.Fatalf("acknowledgements = %v", acknowledged)
+	}
+}

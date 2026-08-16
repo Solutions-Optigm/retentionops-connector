@@ -42,7 +42,7 @@ func TestApplyChangesTheConnectionAndNothingElse(t *testing.T) {
 	secretBefore := before.Reader.Password
 	caBefore := before.TLS.CAFile
 
-	err := Apply(configuration, source, SourceConfiguration{
+	after, _, err := Prepare(configuration, source, SourceConfiguration{
 		Host: "postgres.internal", Port: 6432, Database: "application",
 		ReaderRole: "retentionops_reader", TLSMode: "verify-full",
 	})
@@ -50,7 +50,11 @@ func TestApplyChangesTheConnectionAndNothingElse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	after := configuration.Sources[source]
+	// The running configuration is untouched: preparing is not applying, and a caller that fails
+	// to persist must be left running exactly what it was running before.
+	if configuration.Sources[source].Host != "old.internal" {
+		t.Fatal("preparing mutated the running configuration")
+	}
 	if after.Host != "postgres.internal" || after.Port != 6432 || after.Database != "application" {
 		t.Fatalf("the connection was not applied: %+v", after)
 	}
@@ -78,7 +82,7 @@ func TestApplyChangesTheConnectionAndNothingElse(t *testing.T) {
 // envelope mentioned it would let the control plane add targets to a host by asserting them.
 func TestApplyRefusesASourceThisConnectorDoesNotServe(t *testing.T) {
 	configuration := configurationWithSource()
-	err := Apply(configuration, "00000000-0000-4000-8000-000000000000", SourceConfiguration{
+	_, _, err := Prepare(configuration, "00000000-0000-4000-8000-000000000000", SourceConfiguration{
 		Host: "postgres.internal", Port: 5432, Database: "application",
 		ReaderRole: "retentionops_reader", TLSMode: "verify-full",
 	})
@@ -100,7 +104,7 @@ func TestApplyRefusesAnAuthenticatedButUnusableConfiguration(t *testing.T) {
 		},
 	} {
 		configuration := configurationWithSource()
-		if err := Apply(configuration, source, broken); !errors.Is(err, ErrInvalidConfiguration) {
+		if _, _, err := Prepare(configuration, source, broken); !errors.Is(err, ErrInvalidConfiguration) {
 			t.Fatalf("%s was accepted: %v", name, err)
 		}
 	}

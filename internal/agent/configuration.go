@@ -72,6 +72,12 @@ func (a *Agent) applyOneConfiguration(ctx context.Context, document json.RawMess
 
 // openAndApply returns the outcome code, having logged the detail locally.
 //
+// The sequence is validate, persist, then activate — never the other way round. A configuration
+// becomes the one this connector is running only after it is durably on disk, so REFUSED means
+// exactly one thing: nothing changed, on disk or in memory. An operator reading that outcome can
+// retry, and a connector that failed to be configured is still running the configuration its
+// owner last approved.
+//
 // The error itself never travels: it can name a host, and the customer already has that detail on
 // this machine. The control plane receives the class alone.
 func (a *Agent) openAndApply(envelope sealedconfig.Envelope) string {
@@ -88,20 +94,23 @@ func (a *Agent) openAndApply(envelope sealedconfig.Envelope) string {
 			"envelope_id", envelope.EnvelopeID, "error", err)
 		return sealedconfig.OutcomeFor(err)
 	}
-	if err := sealedconfig.Apply(a.config, envelope.SourceID, opened); err != nil {
+
+	candidate, proposed, err := sealedconfig.Prepare(a.config, envelope.SourceID, opened)
+	if err != nil {
 		a.log.Warn("a sealed configuration was refused",
 			"envelope_id", envelope.EnvelopeID, "error", err)
 		return sealedconfig.OutcomeFor(err)
 	}
-	if err := config.Persist(a.configPath, a.config); err != nil {
-		// The in-memory configuration is already updated and correct, so the connector keeps
-		// working; what is lost is durability across a restart. Reported as invalid rather than
-		// applied, because claiming APPLIED for something that will not survive a restart is the
-		// one answer that would mislead an operator into believing they are done.
+	if err := config.Persist(a.configPath, proposed); err != nil {
+		// Nothing has been activated, so there is nothing to roll back: the running configuration
+		// was never touched. Reporting refused is therefore literally true rather than a hedge.
 		a.log.Error("persisting a sealed configuration failed",
 			"envelope_id", envelope.EnvelopeID, "error", err)
 		return sealedconfig.OutcomeRefusedInvalid
 	}
+
+	// Activated only now, and in place, because the poll loop holds a pointer to this map.
+	a.config.Sources[envelope.SourceID] = candidate
 	a.log.Info("source configuration applied",
 		"envelope_id", envelope.EnvelopeID, "data_source_id", envelope.SourceID)
 	return sealedconfig.OutcomeApplied
