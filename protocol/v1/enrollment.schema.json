@@ -26,6 +26,11 @@
           "description": "Base64 of the 32 raw Ed25519 public key bytes. The private half is generated on the customer's host and has no representation in this protocol at all.",
           "pattern": "^[A-Za-z0-9+/]{43}=$"
         },
+        "encryption_key": {
+          "type": "string",
+          "description": "Base64 of the 32 raw X25519 public key bytes, used to seal a source configuration to this connector (ADR-034). A dedicated key rather than the signing key converted for key agreement: one key answering for two protocols fails silently when it fails. Optional, because a connector enrolled before sealed configuration existed has none and must keep working.",
+          "pattern": "^[A-Za-z0-9+/]{43}=$"
+        },
         "connector_version": { "type": "string", "maxLength": 64 },
         "platform": { "type": "string", "maxLength": 64 }
       }

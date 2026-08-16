@@ -42,11 +42,19 @@ func Run(ctx context.Context, request Request) (*identity.Identity, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Published with the signing key so a console can seal a source configuration to this
+	// connector without a second round trip. Derived from the same seed, so a retried enrolment
+	// publishes the same key and an envelope sealed meanwhile still opens.
+	encryptionKey, err := attempt.EncryptionKey()
+	if err != nil {
+		return nil, err
+	}
 	response, err := client.Enroll(ctx, protocolv1.EnrollmentRequest{
 		ProtocolVersion:  protocolv1.Version,
 		OrganizationID:   request.OrganizationID,
 		Token:            request.Token,
 		PublicKey:        identity.EncodePublic(attempt.PublicKey()),
+		EncryptionKey:    identity.EncodePublicEncryption(encryptionKey.PublicKey()),
 		ConnectorVersion: request.Version,
 		Platform:         runtime.GOOS + "/" + runtime.GOARCH,
 	})

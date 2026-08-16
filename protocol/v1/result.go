@@ -241,10 +241,13 @@ type Heartbeat struct {
 
 // EnrollmentRequest carries the public half of a key pair generated on the customer's host.
 type EnrollmentRequest struct {
-	ProtocolVersion  string `json:"protocol_version"`
-	OrganizationID   string `json:"organization_id"`
-	Token            string `json:"token"`
-	PublicKey        string `json:"public_key"`
+	ProtocolVersion string `json:"protocol_version"`
+	OrganizationID  string `json:"organization_id"`
+	Token           string `json:"token"`
+	PublicKey       string `json:"public_key"`
+	// EncryptionKey is the X25519 half a console seals a source configuration to (ADR-034).
+	// Omitted by a connector built before sealed configuration existed, which must keep enrolling.
+	EncryptionKey    string `json:"encryption_key,omitempty"`
 	ConnectorVersion string `json:"connector_version"`
 	Platform         string `json:"platform,omitempty"`
 }

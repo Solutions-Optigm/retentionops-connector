@@ -8,8 +8,11 @@
 package identity
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -143,9 +146,60 @@ func CompleteEnrollmentAttempt(directory string) error {
 	return nil
 }
 
+// encryptionKeyInfo domain-separates the sealing key from every other use of the same seed.
+const encryptionKeyInfo = "retentionops/connector/v1 source-configuration x25519"
+
+// deriveEncryptionKey produces the X25519 key that opens a sealed source configuration (ADR-034).
+//
+// Derived from the identity seed rather than stored beside it: one secret on disk stays one
+// secret to protect, and an identity file that gains a second key gains a second way to be found
+// half-written. It is a separate key, not the signing key run through the birational map — that
+// map is safe applied correctly and makes one key answer for two protocols when it is not, and
+// the failure is silent. Domain separation gives the same independence with none of that risk.
+func deriveEncryptionKey(seed []byte) (*ecdh.PrivateKey, error) {
+	material, err := hkdf.Key(sha256.New, seed, nil, encryptionKeyInfo, 32)
+	if err != nil {
+		return nil, fmt.Errorf("identity: derive encryption key: %w", err)
+	}
+	key, err := ecdh.X25519().NewPrivateKey(material)
+	if err != nil {
+		return nil, fmt.Errorf("identity: encryption key is unusable: %w", err)
+	}
+	return key, nil
+}
+
+// EncryptionKey is the private half. It never leaves the host, exactly like the signing key.
+func (i *Identity) EncryptionKey() (*ecdh.PrivateKey, error) {
+	return deriveEncryptionKey(i.private.Seed())
+}
+
+// EncryptionKey on an attempt keeps the published key stable across a retry, so a configuration
+// sealed against the first attempt still opens after the second.
+func (a *EnrollmentAttempt) EncryptionKey() (*ecdh.PrivateKey, error) {
+	return deriveEncryptionKey(a.private.Seed())
+}
+
 // EncodePublic renders a public key the way the protocol carries it.
 func EncodePublic(key ed25519.PublicKey) string {
 	return base64.StdEncoding.EncodeToString(key)
+}
+
+// EncodePublicEncryption renders an X25519 public key the way the protocol carries it.
+func EncodePublicEncryption(key *ecdh.PublicKey) string {
+	return base64.StdEncoding.EncodeToString(key.Bytes())
+}
+
+// DecodePublicEncryption parses a protocol-encoded X25519 public key.
+func DecodePublicEncryption(encoded string) (*ecdh.PublicKey, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("identity: encryption key is not base64: %w", err)
+	}
+	key, err := ecdh.X25519().NewPublicKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("identity: encryption key is not a valid X25519 point: %w", err)
+	}
+	return key, nil
 }
 
 // DecodePublic parses a protocol-encoded public key.
