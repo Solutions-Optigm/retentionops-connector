@@ -18,7 +18,9 @@ Group=retentionops
 # rights on a production database has no business being able to write to /usr.
 StateDirectory=retentionops
 StateDirectoryMode=0700
-ReadWritePaths=/var/lib/retentionops
+# Narrowed to what the connector actually writes. /etc/retentionops stays read-only under
+# ProtectSystem=strict: the operator's configuration is theirs, and the managed overlay lives here.
+ReadWritePaths=/var/lib/retentionops/identity /var/lib/retentionops/state /var/lib/retentionops/managed
 
 ProtectSystem=strict
 ProtectHome=yes

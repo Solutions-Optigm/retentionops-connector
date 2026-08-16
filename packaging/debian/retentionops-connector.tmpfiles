@@ -4,3 +4,6 @@ d /etc/retentionops/secrets 0750 root retentionops -
 d /var/lib/retentionops 0700 retentionops retentionops -
 d /var/lib/retentionops/identity 0700 retentionops retentionops -
 d /var/lib/retentionops/state 0700 retentionops retentionops -
+# Configuration received from RetentionOps. Same owner and mode as the state beside it: nothing
+# but the connector reads it, and /etc stays the operator's.
+d /var/lib/retentionops/managed 0700 retentionops retentionops -
