@@ -42,7 +42,7 @@ func TestApplyChangesTheConnectionAndNothingElse(t *testing.T) {
 	secretBefore := before.Reader.Password
 	caBefore := before.TLS.CAFile
 
-	after, _, err := Prepare(configuration, source, SourceConfiguration{
+	after, err := Prepare(configuration, source, SourceConfiguration{
 		Host: "postgres.internal", Port: 6432, Database: "application",
 		ReaderRole: "retentionops_reader", TLSMode: "verify-full",
 	})
@@ -82,7 +82,7 @@ func TestApplyChangesTheConnectionAndNothingElse(t *testing.T) {
 // envelope mentioned it would let the control plane add targets to a host by asserting them.
 func TestApplyRefusesASourceThisConnectorDoesNotServe(t *testing.T) {
 	configuration := configurationWithSource()
-	_, _, err := Prepare(configuration, "00000000-0000-4000-8000-000000000000", SourceConfiguration{
+	_, err := Prepare(configuration, "00000000-0000-4000-8000-000000000000", SourceConfiguration{
 		Host: "postgres.internal", Port: 5432, Database: "application",
 		ReaderRole: "retentionops_reader", TLSMode: "verify-full",
 	})
@@ -104,7 +104,7 @@ func TestApplyRefusesAnAuthenticatedButUnusableConfiguration(t *testing.T) {
 		},
 	} {
 		configuration := configurationWithSource()
-		if _, _, err := Prepare(configuration, source, broken); !errors.Is(err, ErrInvalidConfiguration) {
+		if _, err := Prepare(configuration, source, broken); !errors.Is(err, ErrInvalidConfiguration) {
 			t.Fatalf("%s was accepted: %v", name, err)
 		}
 	}

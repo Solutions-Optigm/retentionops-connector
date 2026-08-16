@@ -13,8 +13,8 @@ import (
 // envelope mentioned it would let the control plane add targets to a host by asserting them.
 var ErrUnknownSource = errors.New("sealedconfig: envelope names a source this connector does not serve")
 
-// Prepare returns the source as it would be after applying, and the whole configuration that
-// would result, having validated it. Nothing the connector is running is touched.
+// Prepare returns the source as it would be after applying, having validated the whole
+// configuration that would result. Nothing the connector is running is touched.
 //
 // Separating "what it would become" from "make it so" is what lets a caller persist first and
 // activate second. An implementation that mutated here and validated afterwards would leave a
@@ -27,10 +27,10 @@ var ErrUnknownSource = errors.New("sealedconfig: envelope names a source this co
 // read nor widen (I32, rule 8), and `Mode`, which decides whether this source may execute at all.
 // The secret references are carried over for the same reason plus one more: they are paths on
 // this host, and no envelope carries a password to put behind them (ADR-034).
-func Prepare(configuration *config.Config, sourceID string, opened SourceConfiguration) (*config.Source, *config.Config, error) {
+func Prepare(configuration *config.Config, sourceID string, opened SourceConfiguration) (*config.Source, error) {
 	current, known := configuration.Sources[sourceID]
 	if !known || current == nil {
-		return nil, nil, ErrUnknownSource
+		return nil, ErrUnknownSource
 	}
 
 	candidate := *current
@@ -56,9 +56,9 @@ func Prepare(configuration *config.Config, sourceID string, opened SourceConfigu
 	// browser and was authenticated, not vetted. Authenticity says who wrote it, never that what
 	// they wrote is a configuration this connector can run.
 	if err := proposed.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("%w: %w", ErrInvalidConfiguration, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidConfiguration, err)
 	}
-	return &candidate, &proposed, nil
+	return &candidate, nil
 }
 
 // ErrInvalidConfiguration is returned when an authenticated envelope would produce a

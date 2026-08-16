@@ -151,12 +151,19 @@ func TestARedeliveredConfigurationIsAcknowledgedButNotReapplied(t *testing.T) {
 	if got := connector.config.Sources[testSource]; got.Host != "postgres.internal" || got.Port != 6432 {
 		t.Fatalf("the configuration was not applied: %+v", got)
 	}
-	written, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("the configuration was not persisted: %v", err)
+	// Written to the managed overlay, never to the operator's own file. That file is a document
+	// its owner reviews; a product that rewrote it would be editing exactly that belief.
+	if _, err := os.Stat(configPath); !os.IsNotExist(err) {
+		t.Fatal("the operator's configuration file was written to")
 	}
-	if !strings.Contains(string(written), "postgres.internal") {
-		t.Fatal("the persisted configuration does not carry the applied host")
+	overlay, err := os.ReadFile(
+		config.ManagedOverlayPath(connector.config.State.Directory),
+	)
+	if err != nil {
+		t.Fatalf("the managed overlay was not persisted: %v", err)
+	}
+	if !strings.Contains(string(overlay), "postgres.internal") {
+		t.Fatal("the managed overlay does not carry the applied host")
 	}
 
 	// The same envelope again, as a lost acknowledgement produces.
@@ -206,8 +213,15 @@ func TestAFailedPersistLeavesTheRunningConfigurationUntouched(t *testing.T) {
 	})
 
 	connector, id, _ := configuredAgent(t, handler)
-	// A path inside a directory that does not exist: the write fails, the rename never happens.
-	connector.configPath = filepath.Join(t.TempDir(), "absent", "connector.yaml")
+	// The overlay is written under the state root. Pointing that at a file rather than a
+	// directory makes every write beneath it fail, which is what an immutable or full filesystem
+	// looks like from here.
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The overlay sits beside the state directory, so the *parent* has to be unusable.
+	connector.config.State.Directory = filepath.Join(blocked, "state")
 
 	key, err := id.EncryptionKey()
 	if err != nil {

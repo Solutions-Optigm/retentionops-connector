@@ -127,10 +127,27 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	config.applyDefaults()
+
+	// base → managed overlay → validate. The operator's file is never rewritten; what RetentionOps
+	// configured lives beside the connector's state and is merged here, so both deployment shapes
+	// -- a package on a host and an immutable container image -- behave identically.
+	overlay, err := LoadManagedOverlay(ManagedOverlayPath(config.State.Directory))
+	if err != nil {
+		return nil, err
+	}
+	if err := ApplyManagedOverlay(&config, overlay); err != nil {
+		return nil, err
+	}
+
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("config: %s is not usable: %w", path, err)
 	}
 	return &config, nil
+}
+
+// ManagedOverlayPath is where the connector persists what RetentionOps configured.
+func ManagedOverlayPath(state string) string {
+	return filepath.Join(ManagedDirectory(state), ManagedFileName)
 }
 
 func (c *Config) applyDefaults() {
@@ -322,6 +339,16 @@ func RequireDirectoryIsPrivate(directory string) error {
 
 // NoncesDirectory is where the replay ledger lives inside the state directory.
 func NoncesDirectory(state string) string { return filepath.Join(state, "nonces") }
+
+// ManagedDirectory sits beside the state directory rather than inside it.
+//
+// `state` is what the connector accumulates while running -- ledgers, nonces, things nobody reads
+// on purpose. `managed` is configuration that arrived from RetentionOps and that an operator will
+// want to open and read. Naming them apart is what keeps "what did the console change" answerable
+// without reading a replay ledger.
+func ManagedDirectory(state string) string {
+	return filepath.Join(filepath.Dir(strings.TrimRight(state, "/")), "managed")
+}
 
 // Describe renders a source for a log line. Host and database are the customer's own
 // infrastructure names, which they already know; no credential, secret reference or row content

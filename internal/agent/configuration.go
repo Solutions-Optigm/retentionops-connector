@@ -95,16 +95,31 @@ func (a *Agent) openAndApply(envelope sealedconfig.Envelope) string {
 		return sealedconfig.OutcomeFor(err)
 	}
 
-	candidate, proposed, err := sealedconfig.Prepare(a.config, envelope.SourceID, opened)
+	candidate, err := sealedconfig.Prepare(a.config, envelope.SourceID, opened)
 	if err != nil {
 		a.log.Warn("a sealed configuration was refused",
 			"envelope_id", envelope.EnvelopeID, "error", err)
 		return sealedconfig.OutcomeFor(err)
 	}
-	if err := config.Persist(a.configPath, proposed); err != nil {
-		// Nothing has been activated, so there is nothing to roll back: the running configuration
-		// was never touched. Reporting refused is therefore literally true rather than a hedge.
-		a.log.Error("persisting a sealed configuration failed",
+	// Written to the managed overlay, never to the operator's own file. `connector.yaml` is a
+	// document its owner reviews and believes they control; a product that silently rewrote it
+	// would be editing exactly that belief. It also keeps an immutable container image immutable:
+	// only the state root needs to be writable, so `read_only: true` survives.
+	overlayPath := config.ManagedOverlayPath(a.config.State.Directory)
+	overlay, err := config.LoadManagedOverlay(overlayPath)
+	if err != nil {
+		a.log.Error("reading the managed overlay failed",
+			"envelope_id", envelope.EnvelopeID, "error", err)
+		return sealedconfig.OutcomeRefusedInvalid
+	}
+	overlay.Sources[envelope.SourceID] = &config.ManagedSource{
+		Host: opened.Host, Port: opened.Port, Database: opened.Database,
+		ReaderRole: opened.ReaderRole, ExecutorRole: opened.ExecutorRole, TLSMode: opened.TLSMode,
+	}
+	if err := config.PersistManagedOverlay(overlayPath, overlay); err != nil {
+		// Nothing has been activated, so there is nothing to roll back: neither the overlay on
+		// disk nor the running configuration was touched. Refused is literally true, not a hedge.
+		a.log.Error("persisting the managed overlay failed",
 			"envelope_id", envelope.EnvelopeID, "error", err)
 		return sealedconfig.OutcomeRefusedInvalid
 	}
