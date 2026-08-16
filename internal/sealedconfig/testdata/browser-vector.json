@@ -1,0 +1,25 @@
+{
+  "recipient_private_key": "WDM89G6xCD3xrkcXI/yzuvT+JgaNoabTM6m5PG98+B0=",
+  "envelope": {
+    "envelope_id": "9f1e2d3c-4b5a-4697-8f0e-1a2b3c4d5e6f",
+    "organization_id": "d0555ae5-d89f-41e8-ba24-31d238ffb8c8",
+    "source_id": "a56f11c4-1051-4972-b838-2f1faa90af19",
+    "connector_id": "4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52",
+    "issued_at": "2026-08-16T12:00:00Z",
+    "expires_at": "2026-08-16T13:00:00Z",
+    "version": 1,
+    "ephemeral_key": "T3DJQFax/r2fkgOPEKLK9YEq26hmsqKlVZBDBQxJFCM=",
+    "nonce": "fKVIJAfqfxf/Upfm",
+    "ciphertext": "AOIj/pGZmQEhemx8Iq2uhEQLyMdv98cjOPNGtQBYSVaVyvhpQvBu1cvdCoay26AjzdDJ5WUudv+ZzyvhP4h4GSEiL8oLAkKvLwJvnkz2rtT9tWxijyxaqGoAzfz88P7dx2Hs0n29GwElDZb3ujfa9Q6c4ptXBJa7bw0X+votqmH2A72207x0bZVit3erW9lSxy/im1AG6iazMDdUA7YmWEyuR169zWMPwOfQQl1yB4s="
+  },
+  "configuration": {
+    "host": "postgres.internal",
+    "port": 5432,
+    "database": "application",
+    "reader_role": "retentionops_reader",
+    "tls_mode": "verify-full",
+    "allowed_schemas": [
+      "application"
+    ]
+  }
+}

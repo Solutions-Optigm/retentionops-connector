@@ -1,0 +1,27 @@
+{
+  "additional_data": "AB1yZXRlbnRpb25vcHMvc2VhbGVkLWNvbmZpZy92MQABMQAkYjdjMWQyZTMtNGY1Ni00Nzg5LWEwYjEtYzJkM2U0ZjU2Nzg5ACRkMDU1NWFlNS1kODlmLTQxZTgtYmEyNC0zMWQyMzhmZmI4YzgAJGE1NmYxMWM0LTEwNTEtNDk3Mi1iODM4LTJmMWZhYTkwYWYxOQAkNGE5ZjJjMTEtNmIzZC00ZTU4LTlmMjEtN2MwYThkNGU2YjUyABQyMDI2LTA4LTE2VDEyOjAwOjAwWgAUMjAyNi0wOC0xNlQxMzowMDowMFo=",
+  "configuration": {
+    "host": "postgres.internal",
+    "port": 5432,
+    "database": "application",
+    "reader_role": "retentionops_reader",
+    "tls_mode": "verify-full",
+    "allowed_schemas": [
+      "application"
+    ]
+  },
+  "envelope": {
+    "version": 1,
+    "envelope_id": "b7c1d2e3-4f56-4789-a0b1-c2d3e4f56789",
+    "organization_id": "d0555ae5-d89f-41e8-ba24-31d238ffb8c8",
+    "source_id": "a56f11c4-1051-4972-b838-2f1faa90af19",
+    "connector_id": "4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52",
+    "issued_at": "2026-08-16T12:00:00Z",
+    "ephemeral_key": "DLm4TyjCaZzFV499onszxdt82Y+3G1Es7BhG2KohYCw=",
+    "expires_at": "2026-08-16T13:00:00Z",
+    "nonce": "2RsDILrsuOdnoW3A",
+    "ciphertext": "/kOxLrEWpMyNMHixBR7nDplv4s8qiAFkFes/lz0GhO/I3jrgrK6/8D1on/t5NjmfLsUvxoWaxFeTGa5FrFu24LLKTtgpVfjeIue2LKCixkQY6LJ0ajlyJ76fjkFtW8ht6NQ3aaTbzDyvVtNE/jGclKGmSLO8Wtqc+o+x7I1nV3TQxa9rDsp0azq92+BJqRNNSLn3miICajD00MRA6Jum2TzoUTCCyiBlbqrHZ0pkS7M="
+  },
+  "recipient_private_key": "WDM89G6xCD3xrkcXI/yzuvT+JgaNoabTM6m5PG98+B0=",
+  "recipient_public_key": "X5+xWzAM3Wg9oAXKqpQByTt60CIiEcSfHsHq+TiyynA="
+}
