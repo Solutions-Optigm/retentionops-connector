@@ -119,7 +119,7 @@ come first.
 
 ### Build from source
 
-For an internal build, use Go 1.25 or later. Building from source is supported, but it is not an
+For an internal build, use Go 1.25.13 or later; `go.mod` refuses anything older, because earlier 1.25 patches carry known standard-library vulnerabilities this binary reaches. Building from source is supported, but it is not an
 official release artifact.
 
 ```bash

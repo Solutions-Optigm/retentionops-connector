@@ -1,6 +1,6 @@
 module github.com/solutions-optigm/retentionops-connector
 
-go 1.25.0
+go 1.25.13
 
 // Three dependencies, on purpose.
 //

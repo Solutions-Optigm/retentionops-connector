@@ -168,7 +168,7 @@ Full reference: [`docs/configuration.md`](docs/configuration.md).
 
 ## Building
 
-Go 1.25 or later. Three direct dependencies: a PostgreSQL driver, a YAML parser and the standard
+Go 1.25.13 or later — the floor is a security one, and `go.mod` enforces it. Three direct dependencies: a PostgreSQL driver, a YAML parser and the standard
 Go terminal helper used for masked input.
 
 ```bash
