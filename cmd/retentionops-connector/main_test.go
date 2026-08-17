@@ -31,6 +31,35 @@ func TestReadPrivateTokenTrimsWithoutPrintingIt(t *testing.T) {
 	}
 }
 
+func TestSecretSetNeverTakesThePasswordAsAnArgument(t *testing.T) {
+	// The console prints this command for an operator to paste. If a password could ride along in
+	// argv it would end up in the process list, in shell history, and in the support ticket the
+	// operator pastes the whole line into.
+	for _, arguments := range [][]string{
+		{"set", "hunter2"},
+		{"set", "--role", "reader", "hunter2"},
+	} {
+		var output strings.Builder
+		err := runSecret(arguments, os.Stdin, &output)
+		if err == nil {
+			t.Fatalf("%v was accepted", arguments)
+		}
+		if strings.Contains(output.String(), "hunter2") {
+			t.Fatal("the value was copied to the output")
+		}
+	}
+}
+
+func TestSecretRequiresAKnownActionAndRole(t *testing.T) {
+	var output strings.Builder
+	if err := runSecret([]string{"rotate"}, os.Stdin, &output); err == nil {
+		t.Fatal("an unknown secret action was accepted")
+	}
+	if err := runSecret([]string{"set", "--role", "superuser"}, os.Stdin, &output); err == nil {
+		t.Fatal("an unknown role was accepted")
+	}
+}
+
 func TestInitRejectsSecretBearingLegacyTokenFlag(t *testing.T) {
 	var output strings.Builder
 	err := runInitIO([]string{"--token", "rtc_secret"}, strings.NewReader(""), &output)

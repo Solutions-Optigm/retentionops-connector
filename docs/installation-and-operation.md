@@ -408,6 +408,25 @@ service. Do not rotate the connector identity casually: it binds the enrolled co
 pinned control-plane key and is also used to sign evidence. If it is compromised or lost, revoke
 the connector through the control-plane workflow and enroll a new identity.
 
+### Store or replace a database password
+
+```bash
+sudo retentionops-connector secret set --role reader
+```
+
+The password is asked for at a masked prompt: it never travels as an argument, so it reaches
+neither the process list nor your shell history. The command writes the file that source's own
+configuration names, atomically, mode `0400`, owned by the `retentionops` account — the same shape
+the file provider requires and the assistant produces.
+
+Add `--source UUID` when the connector serves several sources, `--role executor` for the identity
+that deletes, and `--from-file PATH` for unattended installation (the file must be unreadable by
+group and other). A source whose password is resolved through `env` or `aws-secrets-manager` is
+refused rather than shadowed by a file the connector would not read.
+
+Nothing is sent anywhere and no restart is needed: the password is resolved on each connection.
+Whether PostgreSQL accepts it is answered by the connection test, from a signed result.
+
 ### Observability
 
 With `metrics_address: 127.0.0.1:9102`, metrics are available locally at
@@ -431,7 +450,8 @@ context useful to an attacker.
 | `doctor` reports identity storage failure | Owner and `0700` mode of `identity.directory` | Restore directory permissions; do not replace `identity.json` |
 | Control-plane DNS or HTTPS fails | DNS, proxy and egress 443 | Check `HTTPS_PROXY` and proxy CA configuration, then run `doctor` again |
 | PostgreSQL TLS fails | Hostname, CA file and `verify-full` certificate SAN | Correct the database certificate/host configuration; do not downgrade TLS by default |
-| Authentication fails | Reader/executor grants and secret references | Rotate or correct the local secret; rerun `source test` |
+| Authentication fails | Reader/executor grants and secret references | Store the password again with `secret set`, then rerun `source test` |
+| `SECRET_UNAVAILABLE` in the console | Whether a password file exists where the source's configuration names one | Run `secret set --role reader`; the console ticks the step from the next signed test |
 | `DENIED_TARGET_NOT_ALLOWED` | Local `safety.tables` allow-list | Treat as expected containment; deliberately amend, validate and restart only if the table should be reachable |
 | `DENIED_ROW_LIMIT_EXCEEDED` or `DENIED_BATCH_LIMIT_EXCEEDED` | Local ceiling versus requested scope | Raise the ceiling deliberately or re-plan; the connector will not clamp it |
 | `DENIED_APPROVAL_REQUIRED` | `require_approval` and approval state | Obtain a valid approval; do not disable the local requirement as a workaround |

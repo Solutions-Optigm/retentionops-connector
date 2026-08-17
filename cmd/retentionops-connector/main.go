@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -30,6 +31,7 @@ import (
 	"github.com/solutions-optigm/retentionops-connector/internal/identity"
 	"github.com/solutions-optigm/retentionops-connector/internal/initializer"
 	"github.com/solutions-optigm/retentionops-connector/internal/installer"
+	"github.com/solutions-optigm/retentionops-connector/internal/localsecret"
 	"github.com/solutions-optigm/retentionops-connector/internal/telemetry"
 	protocolv1 "github.com/solutions-optigm/retentionops-connector/protocol/v1"
 	"github.com/solutions-optigm/retentionops-connector/secrets"
@@ -55,6 +57,7 @@ Usage:
   retentionops-connector doctor           [--config PATH]
   retentionops-connector source test      [--config PATH] DATA_SOURCE_ID
   retentionops-connector source discover  [--config PATH] DATA_SOURCE_ID
+  retentionops-connector secret set       [--config PATH] [--source UUID] [--role reader|executor] [--from-file PATH]
   retentionops-connector version
 
 The connector only ever dials out, over HTTPS, to the control plane named in its configuration.
@@ -94,6 +97,8 @@ func run(arguments []string) error {
 		return runDoctor(ctx, arguments[1:])
 	case "source":
 		return runSource(ctx, arguments[1:])
+	case "secret":
+		return runSecret(arguments[1:], os.Stdin, os.Stdout)
 	case "version":
 		fmt.Printf("retentionops-connector %s (%s, protocol v%s)\n", version, runtime.Version(), protocolv1.Version)
 		return nil
@@ -573,4 +578,77 @@ func validated(ok bool) string {
 		return "validated"
 	}
 	return "not validated"
+}
+
+// runSecret writes a database password into the file this host's own configuration names.
+//
+// The last step of an installation that RetentionOps structurally cannot perform: where to
+// connect arrives from the console, the password never does. The value is read from a masked
+// prompt or a private file and never from an argument — an argument is in the process list, in
+// the shell history and in whatever the operator pastes into a support ticket.
+func runSecret(arguments []string, in *os.File, out io.Writer) error {
+	if len(arguments) == 0 || arguments[0] != "set" {
+		return errors.New("secret requires the action: set")
+	}
+	set := flag.NewFlagSet("secret set", flag.ContinueOnError)
+	set.SetOutput(out)
+	path := configFlag(set)
+	sourceID := set.String("source", "", "data source UUID; optional when the connector declares one source")
+	role := set.String("role", string(localsecret.Reader), "identity whose password is being written: reader or executor")
+	fromFile := set.String("from-file", "", "private file holding the password, for unattended installation")
+	if err := set.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if set.NArg() != 0 {
+		return errors.New("secret set accepts flags only; the password is never an argument")
+	}
+	if *role != string(localsecret.Reader) && *role != string(localsecret.Executor) {
+		return fmt.Errorf("unknown role %q: expected reader or executor", *role)
+	}
+
+	configuration, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	identifier := *sourceID
+	if identifier == "" {
+		if identifier, err = localsecret.OnlySource(configuration); err != nil {
+			return err
+		}
+	}
+
+	value, err := secretReader(*fromFile, in, out, *role)
+	if err != nil {
+		return err
+	}
+	if closer, ok := value.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	written, err := localsecret.Set(configuration, identifier, localsecret.Role(*role), value)
+	if err != nil {
+		return err
+	}
+	// The path, never the value, and no confirmation that it "works": whether PostgreSQL accepts
+	// this password is answered by the console's connection test, from a signed result.
+	fmt.Fprintf(out, "The %s password for source %s is stored at %s.\n", *role, identifier, written)
+	fmt.Fprintln(out, "Nothing was sent anywhere. Run the connection test from the console to check it.")
+	return nil
+}
+
+func secretReader(fromFile string, in *os.File, out io.Writer, role string) (io.Reader, error) {
+	if fromFile == "" {
+		masked, err := readMasked(in, out, "PostgreSQL "+role+" password: ")
+		if err != nil {
+			return nil, err
+		}
+		return bytes.NewReader(masked), nil
+	}
+	// Reuses the same privacy check as the enrollment token: a credential handed over in a file
+	// that group or other can read has already been disclosed.
+	raw, err := readPrivateValue(fromFile, role+" password")
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(raw), nil
 }
