@@ -343,6 +343,13 @@ func (s *Source) validatePending(id string) error {
 	if s.Reader.Password.Provider == "" || s.Reader.Password.Ref == "" {
 		return fmt.Errorf("source %s: reader.password needs a provider and a ref, which stay local", id)
 	}
+	// No allowed schema yet, and that is the safest state there is: this connector can reach
+	// nothing. The choice is made once the database is configured and reachable, from the schemas
+	// PostgreSQL actually grants the reader — `retentionops-connector source scope` — rather than
+	// typed from memory before anybody knows what is in there.
+	if len(s.Safety.AllowedSchemas) == 0 {
+		return nil
+	}
 	if err := s.Safety.Validate(); err != nil {
 		return fmt.Errorf("source %s: safety policy: %w", id, err)
 	}

@@ -154,8 +154,13 @@ each replaced file is backed up beside itself first.
 connect. The console sends all four, sealed to this connector (ADR-034), and asking twice only
 produced two answers to reconcile — the sealed one always won. What it does ask is local: an
 output directory, the organization, an optional PostgreSQL CA source path, an optional
-control-plane CA source path, where the reader password will live, and the schemas the local
-safety policy permits.
+control-plane CA source path, and where the reader password will live.
+
+The schemas this connector may enter are not asked here either, and for a better reason than
+brevity: choosing them before the database is configured means typing names from memory, and
+half of them turn out to be schemas the reader role cannot open anyway. They are selected after
+the first successful connection, from what PostgreSQL actually grants — section 5c. Until then the
+allow-list is empty, which is the safest state there is: this connector can reach nothing.
 
 Supply the control-plane CA when your control plane is self-hosted. Leaving it blank there ends
 in `certificate signed by unknown authority` at enrollment, which names TLS rather than the
@@ -225,6 +230,25 @@ your local safety policy allows, and grants no `DELETE`.
 
 Run the connection test from the console. Its result is signed by this connector and is what
 ticks the step; nothing here reports success on its own.
+
+## 5c. Choose the local scope
+
+```bash
+sudo -u retentionops retentionops-connector source scope YOUR_DATA_SOURCE_UUID
+```
+
+The connector asks PostgreSQL which schemas the reader identity can actually enter — system
+schemas excluded — and presents them. You choose; it writes `allowed_schemas` into your
+configuration, keeping the previous file beside it. Restart the connector to load it.
+
+Two boundaries now apply, and the narrower one wins: your PostgreSQL grants, and this allow-list
+on top of them. A schema you allow but the reader cannot open stays unreachable, and one the
+reader could open but you did not allow is never looked at.
+
+**The list never leaves this host.** RetentionOps learns that a scope exists — a discovery returns
+tables, or it does not — never which schemas you chose. That is the same rule as everything else
+in this file: the control plane may not read the local safety policy and may not widen it, and the
+console has no field, no list and no button that could.
 
 ## 6. Enable execution separately
 

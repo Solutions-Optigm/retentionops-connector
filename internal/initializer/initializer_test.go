@@ -138,6 +138,9 @@ func TestInteractiveAndAnswersFileProduceTheSameArtifacts(t *testing.T) {
 	fromFile.Source.Port = 0
 	fromFile.Source.Database = ""
 	fromFile.Source.Reader.Username = ""
+	// The schemas are no longer asked here either: they are chosen from what PostgreSQL grants,
+	// after the first successful connection.
+	fromFile.Source.AllowedSchemas = nil
 	input := strings.Join([]string{
 		interactiveOutput,
 		fromFile.OrganizationID,
@@ -145,7 +148,6 @@ func TestInteractiveAndAnswersFileProduceTheSameArtifacts(t *testing.T) {
 		fromFile.ControlPlane.CASourceFile,
 		fromFile.Source.Reader.Password.Provider,
 		fromFile.Source.Reader.Password.Ref,
-		strings.Join(fromFile.Source.AllowedSchemas, ","),
 	}, "\n") + "\n"
 	interactive, err := Interactive(strings.NewReader(input), &bytes.Buffer{}, interactiveSeed)
 	if err != nil {

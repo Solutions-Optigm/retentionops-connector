@@ -202,10 +202,11 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 		},
 		{label: "Reader secret provider", defaultValue: defaultString(initial.Source.Reader.Password.Provider, "file"), assign: func(value string) error { initial.Source.Reader.Password.Provider = value; return nil }},
 		{label: "Reader secret reference", defaultValue: defaultString(initial.Source.Reader.Password.Ref, "/etc/retentionops/secrets/reader-password"), assign: func(value string) error { initial.Source.Reader.Password.Ref = value; return nil }},
-		{label: "Allowed schemas (comma separated)", defaultValue: strings.Join(initial.Source.AllowedSchemas, ","), assign: func(value string) error {
-			initial.Source.AllowedSchemas = splitSchemas(value)
-			return nil
-		}},
+		// Deliberately not asked. The schemas a connector may enter are the local safety boundary,
+		// and choosing them before the database is even configured means typing names from memory
+		// and finding out later which ones the reader cannot enter anyway. They are selected after
+		// the first successful connection, from what PostgreSQL actually grants, by
+		// `retentionops-connector source scope`.
 	}
 questions:
 	for _, question := range questions {

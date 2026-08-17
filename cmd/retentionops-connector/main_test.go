@@ -114,3 +114,33 @@ func TestInitReportsTheBundleOnlyWhenAskedToApplyIt(t *testing.T) {
 		t.Fatal("--repair did not reach the installer")
 	}
 }
+
+// The scope prompt is the security decision an operator makes, so a mistyped answer must not be
+// interpreted as a choice. "1.2" is not "1,2", and guessing which they meant would allow a schema
+// nobody selected.
+func TestScopeSelectionRefusesAnAnswerItCannotRead(t *testing.T) {
+	reachable := []string{"audit", "billing", "public"}
+
+	chosen, err := selectSchemas("1,3", reachable, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(chosen, ",") != "audit,public" {
+		t.Fatalf("chosen = %v", chosen)
+	}
+
+	for _, answer := range []string{"1.2", "0", "4", "public", "-1"} {
+		if _, err := selectSchemas(answer, reachable, nil); err == nil {
+			t.Fatalf("%q was read as a choice", answer)
+		}
+	}
+
+	// Enter keeps what is already in force rather than clearing it.
+	kept, err := selectSchemas("", reachable, []string{"public"})
+	if err != nil || strings.Join(kept, ",") != "public" {
+		t.Fatalf("kept = %v, err = %v", kept, err)
+	}
+	if _, err := selectSchemas("", reachable, nil); err == nil {
+		t.Fatal("an empty answer with no current scope was accepted")
+	}
+}

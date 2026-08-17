@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,6 +34,7 @@ import (
 	"github.com/solutions-optigm/retentionops-connector/internal/initializer"
 	"github.com/solutions-optigm/retentionops-connector/internal/installer"
 	"github.com/solutions-optigm/retentionops-connector/internal/localsecret"
+	"github.com/solutions-optigm/retentionops-connector/internal/scope"
 	"github.com/solutions-optigm/retentionops-connector/internal/telemetry"
 	protocolv1 "github.com/solutions-optigm/retentionops-connector/protocol/v1"
 	"github.com/solutions-optigm/retentionops-connector/secrets"
@@ -58,6 +61,7 @@ Usage:
   retentionops-connector source test      [--config PATH] DATA_SOURCE_ID
   retentionops-connector source discover  [--config PATH] DATA_SOURCE_ID
   retentionops-connector source roles     [--config PATH] DATA_SOURCE_ID
+  retentionops-connector source scope     [--config PATH] DATA_SOURCE_ID
   retentionops-connector secret set       [--config PATH] [--source UUID] [--role reader|executor] [--from-file PATH]
   retentionops-connector version
 
@@ -560,7 +564,7 @@ func runDoctor(ctx context.Context, arguments []string) error {
 
 func runSource(ctx context.Context, arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("source requires an action: test, discover or roles")
+		return errors.New("source requires an action: test, discover, roles or scope")
 	}
 	action := arguments[0]
 	set := flag.NewFlagSet("source "+action, flag.ContinueOnError)
@@ -590,6 +594,8 @@ func runSource(ctx context.Context, arguments []string) error {
 	adapter := postgres.New(sourceID, source, secrets.Default(), log)
 
 	switch action {
+	case "scope":
+		return chooseScope(ctx, adapter, configuration, *path, sourceID, os.Stdin, os.Stdout)
 	case "roles":
 		// Rendered from the effective configuration rather than written at `init`: the database
 		// name and the role names arrive from the console, so this is the first moment the script
@@ -701,4 +707,89 @@ func secretReader(fromFile string, in *os.File, out io.Writer, role string) (io.
 		return nil, err
 	}
 	return bytes.NewReader(raw), nil
+}
+
+// chooseScope asks PostgreSQL what this reader may enter, then asks the operator what it should.
+//
+// The list never leaves the host. A customer's schema names are an inventory of what they hold,
+// and the whole execution model exists so that RetentionOps does not have one: the control plane
+// learns that a boundary was set, never what is inside it. That is also why the choice is made
+// here rather than in the console — the console could not offer it without first being told.
+func chooseScope(
+	ctx context.Context,
+	adapter *postgres.Adapter,
+	configuration *config.Config,
+	path, sourceID string,
+	in *os.File,
+	out io.Writer,
+) error {
+	reachable, err := adapter.ReachableSchemas(ctx)
+	if err != nil {
+		return err
+	}
+	if len(reachable) == 0 {
+		return errors.New("no schema is reachable by the reader identity; grant it USAGE first, then run this again")
+	}
+	source, _ := configuration.Source(sourceID)
+	current := source.Safety.AllowedSchemas
+
+	fmt.Fprintf(out, "\nSchemas this connector's reader identity can enter:\n\n")
+	for index, name := range reachable {
+		marker := " "
+		if slices.Contains(current, name) {
+			marker = "x"
+		}
+		fmt.Fprintf(out, "  [%s] %d. %s\n", marker, index+1, name)
+	}
+	fmt.Fprintf(out, "\nRetentionOps may analyse only what you choose here. This authorisation is stored\n"+
+		"on this server, and RetentionOps Cloud can neither read it nor widen it.\n")
+	fmt.Fprintf(out, "\nNumbers to allow, separated by commas [%s]: ", strings.Join(current, ","))
+
+	answer, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	chosen, err := selectSchemas(strings.TrimSpace(answer), reachable, current)
+	if err != nil {
+		return err
+	}
+
+	backup, err := scope.Set(path, configuration, sourceID, chosen, reachable)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "\nAllowed: %s\n", strings.Join(chosen, ", "))
+	fmt.Fprintf(out, "Written to %s. The previous file is kept at %s.\n", path, backup)
+	fmt.Fprintln(out, "Restart the connector to load it, then run the schema analysis from the console.")
+	return nil
+}
+
+// selectSchemas turns the operator's answer into names, refusing anything it cannot read.
+//
+// An unparseable answer keeps the current scope rather than guessing at one: this is the list that
+// decides what a connector may look at, and "1,2" mistyped as "1.2" must not silently allow a
+// schema nobody chose.
+func selectSchemas(answer string, reachable, current []string) ([]string, error) {
+	if answer == "" {
+		if len(current) == 0 {
+			return nil, errors.New("choose at least one schema, or this connector can reach nothing")
+		}
+		return append([]string(nil), current...), nil
+	}
+	chosen := []string{}
+	for _, field := range strings.Split(answer, ",") {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		index, err := strconv.Atoi(field)
+		if err != nil || index < 1 || index > len(reachable) {
+			return nil, fmt.Errorf("%q is not one of the numbers above", field)
+		}
+		chosen = append(chosen, reachable[index-1])
+	}
+	if len(chosen) == 0 {
+		return nil, errors.New("choose at least one schema, or this connector can reach nothing")
+	}
+	return chosen, nil
 }

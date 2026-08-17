@@ -162,6 +162,40 @@ func (a *Adapter) TestConnection(ctx context.Context) (*protocolv1.Statistics, e
 	return statistics, nil
 }
 
+// ReachableSchemas lists what the reader identity may enter, for a local scope decision.
+//
+// Names only, never counts of anything inside them, and they never leave this host: the whole
+// point of asking here is that the customer chooses their local boundary from what is real,
+// rather than typing schema names from memory into a prompt. Nothing in this result reaches the
+// control plane — a list of a customer's schemas is exactly the sort of inventory the execution
+// model exists to keep on their side.
+func (a *Adapter) ReachableSchemas(ctx context.Context) ([]string, error) {
+	reader, err := a.connect(ctx, RoleReader)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close(context.WithoutCancel(ctx))
+
+	rows, err := reader.Query(ctx, reachableSchemasStatement)
+	if err != nil {
+		return nil, classify(err)
+	}
+	defer rows.Close()
+
+	schemas := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, classify(err)
+		}
+		schemas = append(schemas, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, classify(err)
+	}
+	return schemas, nil
+}
+
 // Discover reports the structure of the allow-listed schemas: names, types, key membership and
 // a row estimate. It never reads a value.
 func (a *Adapter) Discover(ctx context.Context) (*protocolv1.Statistics, error) {

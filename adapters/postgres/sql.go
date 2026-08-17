@@ -307,6 +307,23 @@ const referenceStatement = `SELECT source_namespace.nspname,
 const versionStatement = `SELECT current_setting('server_version'),
                                  COALESCE((SELECT s.ssl FROM pg_stat_ssl s WHERE s.pid = pg_backend_pid()), false)`
 
+// reachableSchemasStatement lists the schemas the *reader identity* can actually enter.
+//
+// `has_schema_privilege` rather than a plain listing of pg_namespace: a schema this role cannot
+// enter is not a choice, it is a decision PostgreSQL already made. Offering it would invite an
+// operator to allow-list something that will never work and then spend an afternoon on the
+// resulting empty discovery. What remains is the intersection the customer can reason about —
+// their grants, and then their own local allow-list on top.
+//
+// System schemas are excluded: `pg_catalog` and `information_schema` are readable by everyone and
+// contain no customer data, so listing them would only add noise to a security decision.
+const reachableSchemasStatement = `SELECT n.nspname
+                                     FROM pg_namespace n
+                                    WHERE n.nspname NOT LIKE 'pg\\_%'
+                                      AND n.nspname <> 'information_schema'
+                                      AND has_schema_privilege(current_user, n.nspname, 'USAGE')
+                                    ORDER BY n.nspname`
+
 // timeoutStatements bound a transaction.
 //
 // These interpolate integers rather than binding parameters because PostgreSQL's SET does not
