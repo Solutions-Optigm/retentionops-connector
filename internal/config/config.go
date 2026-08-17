@@ -318,6 +318,19 @@ func (s *Source) validate(id string) error {
 	} else if s.Safety.GrantsDelete() {
 		return fmt.Errorf("source %s: executor is required because the local policy grants delete", id)
 	}
+	// A source the console configures may have no allowed schema yet. `init` no longer asks for
+	// them — they are chosen from what PostgreSQL actually grants, which needs a working
+	// connection, which needs a configuration that validates. Refusing the empty list here made
+	// those two correct changes into a deadlock: every configuration the console sent came back
+	// REFUSED_INVALID, and the only way out was the prompt that had just been removed.
+	//
+	// Nothing reachable is the safest state there is, and it is temporary by construction: the
+	// next step is `source scope`. It stays an error for a source this file describes, where an
+	// empty list means somebody wrote a policy that can never do anything.
+	if len(s.Safety.AllowedSchemas) == 0 && s.ConfiguredBy == ConfiguredByRetentionOps &&
+		!s.Safety.GrantsDelete() {
+		return nil
+	}
 	if err := s.Safety.Validate(); err != nil {
 		return fmt.Errorf("source %s: safety policy: %w", id, err)
 	}
