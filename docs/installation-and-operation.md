@@ -137,11 +137,18 @@ Run the command personalized by the console. `init` asks only for non-sensitive 
 creates no empty secret file, performs no network request and executes no SQL:
 
 ```bash
-retentionops-connector init --platform systemd \
+sudo retentionops-connector init --platform systemd \
   --source YOUR_DATA_SOURCE_UUID \
   --organization YOUR_ORGANIZATION_UUID \
-  --control-plane https://connector.retentionops.app
+  --control-plane https://connector.retentionops.app \
+  --install
 ```
+
+`--install` applies the bundle in the same run, from the directory `init` chose, and asks for the
+enrollment token at the end. Drop it to stop after the folder is written — nothing is installed,
+nothing is sent, and you can read every generated file before applying it with the command in
+section 5. Add `--repair` alongside `--install` to replace the runtime files of an earlier attempt;
+each replaced file is backed up beside itself first.
 
 `init` does not ask where the database is, which database it is, or under which role names to
 connect. The console sends all four, sealed to this connector (ADR-034), and asking twice only
@@ -149,6 +156,11 @@ produced two answers to reconcile — the sealed one always won. What it does as
 output directory, the organization, an optional PostgreSQL CA source path, an optional
 control-plane CA source path, where the reader password will live, and the schemas the local
 safety policy permits.
+
+Supply the control-plane CA when your control plane is self-hosted. Leaving it blank there ends
+in `certificate signed by unknown authority` at enrollment, which names TLS rather than the
+question whose answer fixes it — the connector now says so explicitly, but the answer is still
+given here.
 
 Leave the PostgreSQL CA blank unless your server presents a privately signed certificate this
 host does not already trust; blank means the connector verifies against the host's own trust

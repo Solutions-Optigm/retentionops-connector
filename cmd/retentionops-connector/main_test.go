@@ -62,11 +62,55 @@ func TestSecretRequiresAKnownActionAndRole(t *testing.T) {
 
 func TestInitRejectsSecretBearingLegacyTokenFlag(t *testing.T) {
 	var output strings.Builder
-	err := runInitIO([]string{"--token", "rtc_secret"}, strings.NewReader(""), &output)
+	_, _, err := runInitIO([]string{"--token", "rtc_secret"}, strings.NewReader(""), &output)
 	if err == nil {
 		t.Fatal("init accepted an unknown secret-bearing flag")
 	}
 	if strings.Contains(output.String(), "rtc_secret") {
 		t.Fatal("secret was copied to init output")
+	}
+}
+
+// `--install` is what lets the console print one command instead of two. The bundle directory it
+// hands back is the one init actually chose, which is the point: the second command used to carry
+// "$PWD/retentionops-connector-init" and was wrong for anybody who answered that question.
+func TestInitReportsTheBundleOnlyWhenAskedToApplyIt(t *testing.T) {
+	var output strings.Builder
+	directory := filepath.Join(t.TempDir(), "elsewhere")
+	arguments := []string{
+		"--platform", "systemd",
+		"--source", "4a9f2c11-6b3d-4e58-9f21-7c0a8d4e6b52",
+		"--organization", "d0555ae5-d89f-41e8-ba24-31d238ffb8c8",
+		"--control-plane", "https://connector.retentionops.example",
+	}
+	answers := strings.Join([]string{directory, "", "", "", "file", "/etc/retentionops/secrets/reader-password", "public"}, "\n") + "\n"
+
+	applied, repair, err := runInitIO(arguments, strings.NewReader(answers), &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != "" {
+		t.Fatalf("init applied a bundle nobody asked it to apply: %q", applied)
+	}
+
+	applied, repair, err = runInitIO(append(arguments, "--install"), strings.NewReader(answers), &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied != directory {
+		t.Fatalf("applied = %q, want %q", applied, directory)
+	}
+	if repair {
+		t.Fatal("files were replaceable without anybody asking")
+	}
+
+	// An installation that failed at enrolment has already written the runtime configuration, so
+	// the corrected bundle differs from what is on disk. Without this the operator has to abandon
+	// the one-command form to get past their own first attempt.
+	if _, repair, err = runInitIO(append(arguments, "--install", "--repair"), strings.NewReader(answers), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !repair {
+		t.Fatal("--repair did not reach the installer")
 	}
 }

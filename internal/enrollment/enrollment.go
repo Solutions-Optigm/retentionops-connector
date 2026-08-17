@@ -7,6 +7,9 @@ package enrollment
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"runtime"
 	"time"
@@ -32,6 +35,28 @@ type Request struct {
 // The pending private key is persisted before the request and reused on retry. The control plane
 // accepts a consumed token only for that exact public key, so a failure while installing the final
 // identity is resumable without making the token reusable by another party.
+// explainTrust turns a TLS verification failure into the answer to "what do I do now".
+//
+// A self-hosted control plane usually presents a privately signed certificate, and Go reports
+// that as "certificate signed by unknown authority" — accurate, and useless to somebody who has
+// the certificate sitting in their home directory. The fix is one answer to one question in
+// `init`, and this is where an operator finds out which question.
+func explainTrust(err error, caFile string) error {
+	var verification *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	if !errors.As(err, &verification) && !errors.As(err, &authority) && !errors.As(err, &hostname) {
+		return err
+	}
+	if caFile != "" {
+		return fmt.Errorf("enrollment: this host does not trust the control plane's certificate, "+
+			"and the CA this bundle carries (%s) does not sign it: %w", caFile, err)
+	}
+	return fmt.Errorf("enrollment: this host does not trust the control plane's certificate. "+
+		"A self-hosted control plane usually has a private one: run init again and supply its CA "+
+		"certificate when asked, then install again with --repair: %w", err)
+}
+
 func Run(ctx context.Context, request Request) (*identity.Identity, error) {
 	attempt, err := identity.LoadOrCreateEnrollmentAttempt(request.Directory, request.OrganizationID)
 	if err != nil {
@@ -59,7 +84,7 @@ func Run(ctx context.Context, request Request) (*identity.Identity, error) {
 		Platform:         runtime.GOOS + "/" + runtime.GOARCH,
 	})
 	if err != nil {
-		return nil, err
+		return nil, explainTrust(err, request.CAFile)
 	}
 	if response.OrganizationID != request.OrganizationID {
 		return nil, fmt.Errorf("enrollment: the control plane answered for organization %s, not %s",

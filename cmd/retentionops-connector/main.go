@@ -46,7 +46,7 @@ const defaultConfigPath = "/etc/retentionops/connector.yaml"
 const usage = `retentionops-connector %s — RetentionOps data-plane connector
 
 Usage:
-  retentionops-connector init --platform systemd|compose --source UUID --organization UUID --control-plane HTTPS_URL
+  retentionops-connector init --platform systemd|compose --source UUID --organization UUID --control-plane HTTPS_URL [--install [--repair]]
   retentionops-connector init --answers-file PATH
   retentionops-connector install --bundle PATH [--repair] [--reader-secret-file PATH] [--token-file PATH]
   retentionops-connector execution enable --config PATH --source UUID --table schema.table:column
@@ -83,7 +83,7 @@ func run(arguments []string) error {
 
 	switch arguments[0] {
 	case "init":
-		return runInit(arguments[1:], os.Stdin, os.Stdout)
+		return runInit(ctx, arguments[1:], os.Stdin, os.Stdout)
 	case "install":
 		return runInstall(ctx, arguments[1:], os.Stdin, os.Stdout)
 	case "execution":
@@ -111,11 +111,33 @@ func run(arguments []string) error {
 	}
 }
 
-func runInit(arguments []string, in *os.File, out *os.File) error {
-	return runInitIO(arguments, in, out)
+func runInit(ctx context.Context, arguments []string, in *os.File, out *os.File) error {
+	directory, repair, err := runInitIO(arguments, in, out)
+	if err != nil || directory == "" {
+		return err
+	}
+	// Piped input cannot reach the token prompt: the question loop above reads through a buffer
+	// that has already consumed whatever followed the last answer. Interactively that never
+	// happens — a terminal hands over one line at a time — so this refuses the one shape where
+	// the token would be silently swallowed, and names the form that does work unattended.
+	if !term.IsTerminal(int(in.Fd())) {
+		return errors.New(
+			"init --install needs a terminal for the enrollment token; " +
+				"for an unattended installation run init, then install --bundle --token-file")
+	}
+	// Applying what was just written, in the same run, from the directory `init` actually chose.
+	// The alternative the console used to print was a second command carrying "$PWD/..." — which
+	// is wrong the moment an operator answers the output-directory question with anything else.
+	fmt.Fprintln(out, "\nApplying this bundle. Review it instead by running init without --install.")
+	return installer.Run(ctx, installer.Options{
+		Bundle: directory, Root: "/", Repair: repair, Version: version,
+		Prompts: terminalPrompts(in, out), Out: out,
+	})
 }
 
-func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
+// runInitIO returns the bundle directory when the caller asked for it to be applied immediately,
+// along with whether an earlier attempt's files may be replaced.
+func runInitIO(arguments []string, in io.Reader, out io.Writer) (string, bool, error) {
 	set := flag.NewFlagSet("init", flag.ContinueOnError)
 	set.SetOutput(out)
 	platform := set.String("platform", "", "deployment platform: systemd or compose")
@@ -123,28 +145,33 @@ func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
 	organizationID := set.String("organization", "", "organization UUID from the console")
 	controlPlane := set.String("control-plane", "", "RetentionsOps HTTPS control-plane URL")
 	answersFile := set.String("answers-file", "", "strict versioned YAML answers file")
+	apply := set.Bool("install", false, "apply the generated bundle immediately, in this same run")
+	// Needed more often than it looks: an installation that failed at enrolment has already
+	// written the runtime configuration, so the corrected bundle differs from what is on disk and
+	// the installer refuses it. Without this the operator has to abandon --install entirely.
+	repair := set.Bool("repair", false, "with --install, back up and replace conflicting generated runtime files")
 	if err := set.Parse(arguments); err != nil {
-		return err
+		return "", false, err
 	}
 	if set.NArg() != 0 {
-		return errors.New("init accepts flags only")
+		return "", false, errors.New("init accepts flags only")
 	}
 	var answers initializer.Answers
 	if *answersFile != "" {
 		if *platform != "" || *sourceID != "" || *organizationID != "" || *controlPlane != "" {
-			return errors.New("--answers-file cannot be combined with interactive installation flags")
+			return "", false, errors.New("--answers-file cannot be combined with interactive installation flags")
 		}
 		loaded, err := initializer.LoadAnswers(*answersFile)
 		if err != nil {
-			return err
+			return "", false, err
 		}
 		answers = loaded
 	} else {
 		if *platform == "" || *sourceID == "" || *controlPlane == "" {
-			return errors.New("--platform, --source and --control-plane are required in interactive mode")
+			return "", false, errors.New("--platform, --source and --control-plane are required in interactive mode")
 		}
 		if err := initializer.ValidateControlPlaneFlag(*controlPlane); err != nil {
-			return err
+			return "", false, err
 		}
 		answers = initializer.Answers{
 			Version: initializer.AnswersVersion, Platform: *platform, SourceID: *sourceID,
@@ -153,14 +180,17 @@ func runInitIO(arguments []string, in io.Reader, out io.Writer) error {
 		var err error
 		answers, err = initializer.Interactive(in, out, answers)
 		if err != nil {
-			return err
+			return "", false, err
 		}
 	}
 	if err := initializer.Generate(answers); err != nil {
-		return err
+		return "", false, err
 	}
 	fmt.Fprintf(out, "Installation bundle written to %s. No SQL was executed and no network request was made.\n", answers.OutputDirectory)
-	return nil
+	if !*apply {
+		return "", false, nil
+	}
+	return answers.OutputDirectory, *repair, nil
 }
 
 func runInstall(ctx context.Context, arguments []string, in *os.File, out *os.File) error {
@@ -195,7 +225,19 @@ func runInstall(ctx context.Context, arguments []string, in *os.File, out *os.Fi
 		}
 		inputs.Token = token
 	}
-	prompts := installer.Prompts{
+	return installer.Run(ctx, installer.Options{
+		Bundle: *bundle, Root: "/", Repair: *repair, NonInteractive: *nonInteractive,
+		Version: version, Inputs: inputs, Prompts: terminalPrompts(in, out), Out: out,
+		DatabaseRoleApplied: *databaseRoleApplied,
+	})
+}
+
+// terminalPrompts is the only place a secret is read from a person.
+//
+// Masked, and never from an argument: an argument is in the process list, in the shell history,
+// and in whatever the operator pastes into a support ticket (ADR-032).
+func terminalPrompts(in *os.File, out io.Writer) installer.Prompts {
+	return installer.Prompts{
 		Secret: func(label string) ([]byte, error) { return readMasked(in, out, label+": ") },
 		Token: func() (string, error) {
 			raw, err := readMasked(in, out, "Single-use enrollment token: ")
@@ -211,11 +253,6 @@ func runInstall(ctx context.Context, arguments []string, in *os.File, out *os.Fi
 			return answer == "y" || answer == "yes", nil
 		},
 	}
-	return installer.Run(ctx, installer.Options{
-		Bundle: *bundle, Root: "/", Repair: *repair, NonInteractive: *nonInteractive,
-		Version: version, Inputs: inputs, Prompts: prompts, Out: out,
-		DatabaseRoleApplied: *databaseRoleApplied,
-	})
 }
 
 func readMasked(in *os.File, out io.Writer, prompt string) ([]byte, error) {
