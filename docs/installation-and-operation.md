@@ -143,9 +143,22 @@ retentionops-connector init --platform systemd \
   --control-plane https://connector.retentionops.app
 ```
 
-Provide the PostgreSQL CA certificate's current source path when prompted. The runtime path is
-fixed and recorded separately in `bundle.json`; there is no `YOUR-POSTGRES-CA.pem` placeholder.
-Review `connector.yaml`, `roles.sql` and `bundle.json` before continuing.
+`init` does not ask where the database is, which database it is, or under which role names to
+connect. The console sends all four, sealed to this connector (ADR-034), and asking twice only
+produced two answers to reconcile — the sealed one always won. What it does ask is local: an
+output directory, the organization, an optional PostgreSQL CA source path, an optional
+control-plane CA source path, where the reader password will live, and the schemas the local
+safety policy permits.
+
+Leave the PostgreSQL CA blank unless your server presents a privately signed certificate this
+host does not already trust; blank means the connector verifies against the host's own trust
+store, which is correct for a publicly trusted certificate. A supplied certificate is copied into
+the bundle and the runtime path is recorded in `bundle.json`.
+
+Review `connector.yaml` and `bundle.json` before continuing. The generated source records
+`configured_by: retentionops` and carries no address: it is declared, visible and unusable until
+the console configures it. `roles.sql` is not written here — it needs the database and the role
+names, and it is rendered by `source roles` once those exist.
 
 ## 5. Run the resumable assistant
 
@@ -153,11 +166,18 @@ Review `connector.yaml`, `roles.sql` and `bundle.json` before continuing.
 sudo retentionops-connector install --bundle "$PWD/retentionops-connector-init"
 ```
 
-The assistant verifies artifact digests and the CA, preserves conflicting existing files, prints
-an exact `psql` command for the configured host and database, waits for the DBA confirmation,
-requests the reader password and enrollment token through masked input, tests and discovers the
-source, enrolls, then runs `doctor`. Its state contains completed step names only—never a password
-or token. After an interruption, run the same command again.
+The assistant verifies artifact digests and the CA, preserves conflicting existing files,
+requests the enrollment token through masked input, enrolls, then runs `doctor`.
+
+For a source the console configures, it stops there: there is no database to test, no roles to
+confirm and no password to ask for, because nobody has named the role that password belongs to.
+Those steps move after the console's configuration and are covered in section 6 below. For a
+bundle that describes the database locally, it also prints an exact `psql` command for that host
+and database, waits for the DBA confirmation, requests the reader password through masked input,
+and tests and discovers the source before enrolling.
+
+Its state contains completed step names only—never a password or token. After an interruption,
+run the same command again.
 
 For unattended secret input, use private files rather than arguments or environment variables:
 
@@ -170,6 +190,29 @@ sudo retentionops-connector install \
 
 The initial configuration is explicitly `discovery_only`. It has no executor identity and no
 table granting `delete`.
+
+## 5b. Finish from the console
+
+Configure the source in the RetentionOps console: host, port, database, reader role, executor
+role and transport security. The console seals that document to this connector and relays a
+ciphertext it cannot open; the connector applies it to its managed overlay and acknowledges.
+`/etc/retentionops/connector.yaml` is never rewritten — the overlay lives beside the connector's
+state and is merged at load.
+
+Then finish on the host, where both commands can finally name what the console chose:
+
+```bash
+sudo -u retentionops retentionops-connector source roles YOUR_DATA_SOURCE_UUID \
+  | psql -h YOUR_HOST -U postgres -d YOUR_DATABASE
+sudo retentionops-connector secret set --role reader
+```
+
+`source roles` renders the reviewed reader-role script from the configuration in force. Read it
+before applying it: it creates login roles, grants `CONNECT`, `USAGE` and `SELECT` on the schemas
+your local safety policy allows, and grants no `DELETE`.
+
+Run the connection test from the console. Its result is signed by this connector and is what
+ticks the step; nothing here reports success on its own.
 
 ## 6. Enable execution separately
 

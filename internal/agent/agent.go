@@ -208,6 +208,19 @@ func (a *Agent) handle(ctx context.Context, raw []byte) {
 		a.metrics.Inc("retentionops_connector_denials_total", map[string]string{"code": string(protocolv1.DeniedUnknownSource)})
 		return
 	}
+	if source.Pending() {
+		// Nothing to connect to yet: the console declared this source and has not sent the
+		// configuration. Refused as unknown rather than attempted, because an attempt would
+		// classify as "your database did not answer" and send an operator to check a firewall
+		// for a database whose address nobody has given yet.
+		a.log.Warn("job names a source that has not been configured yet",
+			"job_id", job.JobID, "data_source_id", job.DataSourceID)
+		a.report(ctx, job, func() (protocolv1.JobResult, error) {
+			return a.builder.Refusal(job, protocolv1.DeniedUnknownSource, startedAt, a.identity)
+		})
+		a.metrics.Inc("retentionops_connector_denials_total", map[string]string{"code": string(protocolv1.DeniedUnknownSource)})
+		return
+	}
 	if job.Operation == protocolv1.OpDelete && source.Mode == config.SourceModeDiscoveryOnly {
 		// EXECUTION_DISABLED is deliberately local detail. The wire protocol keeps its reviewed
 		// v1 denial vocabulary and carries DENIED_BY_LOCAL_POLICY rather than growing a fifth
@@ -524,13 +537,24 @@ func (a *Agent) heartbeatLoop(ctx context.Context) {
 func (a *Agent) sendHeartbeat(ctx context.Context) {
 	sources := make([]protocolv1.SourceStatus, 0, len(a.config.Sources))
 	for id, source := range a.config.Sources {
-		sources = append(sources, protocolv1.SourceStatus{
+		// The local shape, and only that. Whether PostgreSQL answers is what a signed inspection
+		// reports; what a heartbeat can honestly say is whether this connector has been told
+		// where the database is. Reporting READY for a source with no address was a claim nobody
+		// had checked, and it made the console's checklist tick a step that had not happened.
+		status := protocolv1.SourceReady
+		if source.Pending() {
+			status = protocolv1.SourceUnconfigured
+		}
+		reported := protocolv1.SourceStatus{
 			DataSourceID:  id,
 			Type:          source.Type,
-			Status:        protocolv1.SourceReady,
-			TLSMode:       source.TLS.Mode,
+			Status:        status,
 			AllowedTables: source.Safety.AllowedTableCount(),
-		})
+		}
+		if status == protocolv1.SourceReady {
+			reported.TLSMode = source.TLS.Mode
+		}
+		sources = append(sources, reported)
 	}
 	// Derived, never read from disk, so a heartbeat cannot publish a key the identity does not
 	// actually hold. A derivation failure is logged and the heartbeat still goes out: liveness is

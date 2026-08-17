@@ -32,6 +32,13 @@ const (
 	SourceModeDiscoveryOnly = "discovery_only"
 	SourceModeExecution     = "execution"
 	ExecutionDisabledCode   = "EXECUTION_DISABLED"
+
+	// ConfiguredByLocal is the default and the stricter one: this file describes the database,
+	// and every field must be present and valid before the connector will start.
+	ConfiguredByLocal = "local"
+	// ConfiguredByRetentionOps means the console sends where to connect, sealed to this
+	// connector (ADR-034). Never what may be deleted.
+	ConfiguredByRetentionOps = "retentionops"
 )
 
 // SecretRef names where a credential lives. It is a reference, never a value: a password
@@ -61,15 +68,36 @@ type TLS struct {
 // never causes the executor secret to be resolved. A flaw in the planning path therefore cannot
 // hand an attacker the destructive identity, because that identity was never fetched.
 type Source struct {
-	Type     string        `yaml:"type"`
-	Mode     string        `yaml:"mode,omitempty"`
-	Host     string        `yaml:"host"`
-	Port     int           `yaml:"port"`
-	Database string        `yaml:"database"`
-	TLS      TLS           `yaml:"tls"`
-	Reader   Credential    `yaml:"reader"`
-	Executor Credential    `yaml:"executor"`
-	Safety   policy.Safety `yaml:"safety"`
+	Type string `yaml:"type"`
+	Mode string `yaml:"mode,omitempty"`
+	// ConfiguredBy says who describes this database: this file, or the RetentionOps console
+	// through a sealed configuration.
+	//
+	// Written by `init` and read by an operator, which is the point of it being here rather than
+	// inferred from an empty host. "Where is this database?" and "why is this field blank?" are
+	// different questions, and a typo that emptied a host must keep failing loudly instead of
+	// becoming a source that quietly waits for someone to configure it remotely.
+	//
+	// It never widens anything: the console may set where to connect and as whom, and the safety
+	// policy below stays local and unreadable to it in both cases.
+	ConfiguredBy string        `yaml:"configured_by,omitempty"`
+	Host         string        `yaml:"host"`
+	Port         int           `yaml:"port"`
+	Database     string        `yaml:"database"`
+	TLS          TLS           `yaml:"tls"`
+	Reader       Credential    `yaml:"reader"`
+	Executor     Credential    `yaml:"executor"`
+	Safety       policy.Safety `yaml:"safety"`
+}
+
+// Pending reports a source RetentionOps configures that has not been configured yet.
+//
+// Declared, visible, and unusable. The alternative — refusing the file until a host is known —
+// forces the operator to answer in a terminal every question the console is about to ask, and
+// then to watch the console overwrite their answers. What this state buys is an order that makes
+// sense: enrol, configure from the console, then test.
+func (s *Source) Pending() bool {
+	return s.ConfiguredBy == ConfiguredByRetentionOps && (s.Host == "" || s.Database == "")
 }
 
 // ControlPlane is where to reach RetentionOps. The connector only ever dials out.
@@ -241,6 +269,14 @@ func (s *Source) validate(id string) error {
 	if s.Type != "postgresql" {
 		return fmt.Errorf("source %s: only postgresql is implemented, not %q", id, s.Type)
 	}
+	switch s.ConfiguredBy {
+	case "", ConfiguredByLocal, ConfiguredByRetentionOps:
+	default:
+		return fmt.Errorf("source %s: configured_by %q is not one of local, retentionops", id, s.ConfiguredBy)
+	}
+	if s.Pending() {
+		return s.validatePending(id)
+	}
 	if s.Host == "" || s.Database == "" {
 		return fmt.Errorf("source %s: host and database are required", id)
 	}
@@ -264,9 +300,11 @@ func (s *Source) validate(id string) error {
 	default:
 		return fmt.Errorf("source %s: tls.mode %q is not one of verify-full, verify-ca, require", id, s.TLS.Mode)
 	}
-	if s.TLS.Mode != TLSRequire && s.TLS.CAFile == "" {
-		return fmt.Errorf("source %s: tls.mode %s needs a ca_file to verify against", id, s.TLS.Mode)
-	}
+	// An absent ca_file is the host's own trust store, which is how every other TLS client on
+	// this machine verifies a publicly trusted certificate. Refusing it used to force an operator
+	// to name a path for a database that needed none, and the usual way out of that question was
+	// to point at the public bundle and hope — or to drop to `require`, which verifies nothing.
+	// Verification still happens in both cases; only the source of the roots differs.
 	if err := s.Reader.validate(id, "reader"); err != nil {
 		return err
 	}
@@ -279,6 +317,31 @@ func (s *Source) validate(id string) error {
 		}
 	} else if s.Safety.GrantsDelete() {
 		return fmt.Errorf("source %s: executor is required because the local policy grants delete", id)
+	}
+	if err := s.Safety.Validate(); err != nil {
+		return fmt.Errorf("source %s: safety policy: %w", id, err)
+	}
+	return nil
+}
+
+// validatePending checks what a source can be held to before anybody has said where it is.
+//
+// Two things are still required and both are local: somewhere to read this source's password
+// from, and a safety policy that grants no delete. The second is the one that matters — a source
+// nobody has described yet must not be a source that could delete the moment a configuration
+// arrives, because enabling execution is a separate, reviewed, local decision and the console has
+// no part in it.
+func (s *Source) validatePending(id string) error {
+	if s.Safety.GrantsDelete() {
+		return fmt.Errorf(
+			"source %s: a source configured by retentionops cannot grant delete before it is configured; "+
+				"enable execution locally once it is", id)
+	}
+	if s.Mode == SourceModeExecution {
+		return fmt.Errorf("source %s: mode execution needs a configured database", id)
+	}
+	if s.Reader.Password.Provider == "" || s.Reader.Password.Ref == "" {
+		return fmt.Errorf("source %s: reader.password needs a provider and a ref, which stay local", id)
 	}
 	if err := s.Safety.Validate(); err != nil {
 		return fmt.Errorf("source %s: safety policy: %w", id, err)

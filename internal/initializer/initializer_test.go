@@ -131,15 +131,18 @@ func TestInteractiveAndAnswersFileProduceTheSameArtifacts(t *testing.T) {
 	fromFile := validAnswers(fileOutput, PlatformSystemd)
 	interactiveSeed := validAnswers(interactiveOutput, PlatformSystemd)
 	interactiveSeed.Source = Source{}
+	// The console describes the database now, so the answers file that still does is the local
+	// shape and the interactive path is the pending one. Parity is asserted on the artifacts they
+	// can both produce: everything except the connection shape itself.
+	fromFile.Source.Host = ""
+	fromFile.Source.Port = 0
+	fromFile.Source.Database = ""
+	fromFile.Source.Reader.Username = ""
 	input := strings.Join([]string{
 		interactiveOutput,
 		fromFile.OrganizationID,
-		fromFile.Source.Host,
-		"5432",
-		fromFile.Source.Database,
 		fromFile.Source.TLSCASourceFile,
 		fromFile.ControlPlane.CASourceFile,
-		fromFile.Source.Reader.Username,
 		fromFile.Source.Reader.Password.Provider,
 		fromFile.Source.Reader.Password.Ref,
 		strings.Join(fromFile.Source.AllowedSchemas, ","),
@@ -154,7 +157,7 @@ func TestInteractiveAndAnswersFileProduceTheSameArtifacts(t *testing.T) {
 	if err := Generate(interactive); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"connector.yaml", "roles.sql", "retentionops-connector.service", "NEXT-STEPS.txt", "bundle.json"} {
+	for _, name := range []string{"connector.yaml", "retentionops-connector.service", "NEXT-STEPS.txt", "bundle.json"} {
 		if !reflect.DeepEqual(readBytes(t, filepath.Join(fileOutput, name)), readBytes(t, filepath.Join(interactiveOutput, name))) {
 			t.Fatalf("%s differs between interactive and answers-file inputs", name)
 		}
@@ -242,37 +245,61 @@ func readBytes(t *testing.T, path string) []byte {
 	return raw
 }
 
-func TestInteractiveRefusesAnEmptyCertificateAndAsksAgain(t *testing.T) {
-	// Pressing Enter here used to be accepted, and `install` refused the bundle afterwards —
-	// one step later, often on a different machine, naming a bundle input rather than the
-	// question that produced it. The refusal belongs where the answer is given.
+func TestInteractiveAsksNothingTheConsoleWillSend(t *testing.T) {
+	// The question an operator could not answer is gone, along with the three the console now
+	// asks: a host, a database and a role name typed here were overwritten by the first sealed
+	// configuration, which is two sources of truth and one of them wrong.
 	seed := validAnswers(t.TempDir(), PlatformSystemd)
 	seed.Source = Source{}
-	certificate := filepath.Join(t.TempDir(), "postgres-ca.pem")
-	if err := os.WriteFile(certificate, []byte("-----BEGIN CERTIFICATE-----\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	transcript := &bytes.Buffer{}
 
 	answers, err := Interactive(strings.NewReader(strings.Join([]string{
-		seed.OutputDirectory, seed.OrganizationID, "postgres.internal", "5432", "application",
-		"", // the operator who does not know what to enter
-		certificate,
+		seed.OutputDirectory, seed.OrganizationID,
+		"", // this host's trust store verifies the database
 		"", // publicly trusted control plane: nothing to supply
-		"retentionops_reader", "file", "/etc/retentionops/secrets/reader-password", "application",
+		"file", "/etc/retentionops/secrets/reader-password", "application",
 	}, "\n")+"\n"), transcript, seed)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if answers.Source.TLSCASourceFile != certificate {
-		t.Fatalf("certificate = %q, want %q", answers.Source.TLSCASourceFile, certificate)
+	for _, absent := range []string{"PostgreSQL host", "Database", "Reader role", "PostgreSQL port"} {
+		if strings.Contains(transcript.String(), absent) {
+			t.Fatalf("init still asks %q, which the console sends", absent)
+		}
 	}
-	if !strings.Contains(transcript.String(), "required") {
-		t.Fatal("an empty answer was accepted without saying the certificate is required")
+	if answers.Source.Host != "" || answers.Source.Database != "" {
+		t.Fatal("interactive initialization described the database")
 	}
-	if !strings.Contains(transcript.String(), "postgresql.conf") {
-		t.Fatal("the question does not say where the certificate usually already exists")
+	if answers.Source.TLSCASourceFile != "" {
+		t.Fatalf("a blank certificate answer was not kept: %q", answers.Source.TLSCASourceFile)
+	}
+	if !strings.Contains(transcript.String(), "Leave blank") {
+		t.Fatal("the certificate question does not say that blank is an answer")
+	}
+}
+
+func TestAPendingSourceIsDeclaredUnusableAndUndeletable(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "bundle")
+	answers := validAnswers(output, PlatformSystemd)
+	answers.Source.Host = ""
+	answers.Source.Database = ""
+	answers.Source.Reader.Username = ""
+	if err := Generate(answers); err != nil {
+		t.Fatal(err)
+	}
+
+	generated := read(t, filepath.Join(output, "connector.yaml"))
+	if !strings.Contains(generated, "configured_by: retentionops") {
+		t.Fatalf("the source does not record who describes it:\n%s", generated)
+	}
+	// roles.sql needs the database and the role names, which nobody has supplied yet. Writing one
+	// from placeholders would hand a DBA a script that creates the wrong role.
+	if _, err := os.Stat(filepath.Join(output, "roles.sql")); !os.IsNotExist(err) {
+		t.Fatal("a bundle with no database still produced roles.sql")
+	}
+	if strings.Contains(generated, "mode: execution") {
+		t.Fatal("a source nobody has described must not be an execution target")
 	}
 }
 
@@ -284,10 +311,10 @@ func TestInteractiveNotesACertificateThatIsNotReadableHere(t *testing.T) {
 	transcript := &bytes.Buffer{}
 
 	answers, err := Interactive(strings.NewReader(strings.Join([]string{
-		seed.OutputDirectory, seed.OrganizationID, "postgres.internal", "5432", "application",
+		seed.OutputDirectory, seed.OrganizationID,
 		"/secure/postgres/ca.crt",
 		"", // publicly trusted control plane: nothing to supply
-		"retentionops_reader", "file", "/etc/retentionops/secrets/reader-password", "application",
+		"file", "/etc/retentionops/secrets/reader-password", "application",
 	}, "\n")+"\n"), transcript, seed)
 	if err != nil {
 		t.Fatal(err)
@@ -347,5 +374,31 @@ func TestAPubliclyTrustedControlPlanePinsNoCertificate(t *testing.T) {
 	}
 	if strings.Contains(read(t, filepath.Join(output, "compose.yaml")), "control-plane-ca.pem") {
 		t.Fatal("compose.yaml mounts a control-plane CA that install never writes")
+	}
+}
+
+// An empty mount source is not YAML Docker accepts, so the bundle for a database this host
+// already trusts has to omit the line rather than emit a half of one.
+func TestComposeOmitsACertificateMountWhenNoneWasSupplied(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "bundle")
+	answers := validAnswers(output, PlatformCompose)
+	answers.Source = Source{
+		Reader: config.Credential{Password: config.SecretRef{
+			Provider: "file", Ref: "/etc/retentionops/secrets/reader-password",
+		}},
+		AllowedSchemas: []string{"application"},
+	}
+	if err := Generate(answers); err != nil {
+		t.Fatal(err)
+	}
+
+	compose := read(t, filepath.Join(output, "compose.yaml"))
+	if strings.Contains(compose, "postgres-ca.pem") {
+		t.Fatalf("compose.yaml mounts a certificate that was never supplied:\n%s", compose)
+	}
+	for _, line := range strings.Split(compose, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "- ./") && strings.HasSuffix(line, "::ro") {
+			t.Fatalf("compose.yaml has a mount with no target: %q", line)
+		}
 	}
 }

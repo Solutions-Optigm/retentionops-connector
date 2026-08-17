@@ -57,6 +57,7 @@ Usage:
   retentionops-connector doctor           [--config PATH]
   retentionops-connector source test      [--config PATH] DATA_SOURCE_ID
   retentionops-connector source discover  [--config PATH] DATA_SOURCE_ID
+  retentionops-connector source roles     [--config PATH] DATA_SOURCE_ID
   retentionops-connector secret set       [--config PATH] [--source UUID] [--role reader|executor] [--from-file PATH]
   retentionops-connector version
 
@@ -522,7 +523,7 @@ func runDoctor(ctx context.Context, arguments []string) error {
 
 func runSource(ctx context.Context, arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("source requires an action: test or discover")
+		return errors.New("source requires an action: test, discover or roles")
 	}
 	action := arguments[0]
 	set := flag.NewFlagSet("source "+action, flag.ContinueOnError)
@@ -543,10 +544,22 @@ func runSource(ctx context.Context, arguments []string) error {
 	if !known {
 		return fmt.Errorf("source %s is not in %s", sourceID, *path)
 	}
+	if source.Pending() {
+		return fmt.Errorf(
+			"source %s has no configuration yet: send it from the RetentionOps console, then run this again",
+			sourceID)
+	}
 	log := telemetry.NewLogger(configuration.Telemetry.LogFormat, configuration.Telemetry.LogLevel)
 	adapter := postgres.New(sourceID, source, secrets.Default(), log)
 
 	switch action {
+	case "roles":
+		// Rendered from the effective configuration rather than written at `init`: the database
+		// name and the role names arrive from the console, so this is the first moment the script
+		// can name what the DBA is actually being asked to create.
+		fmt.Print(postgres.RenderRolesSQL(
+			source.Database, source.Reader, source.Executor, source.Safety.AllowedSchemas))
+		return nil
 	case "test":
 		statistics, err := adapter.TestConnection(ctx)
 		if err != nil {

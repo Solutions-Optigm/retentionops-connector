@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -239,4 +240,79 @@ func TestInstallWritesNoControlPlaneCertificateWhenNoneWasSupplied(t *testing.T)
 	if _, err := os.Stat(rooted(root, "/etc/retentionops/certs/control-plane-ca.pem")); !os.IsNotExist(err) {
 		t.Fatal("install pinned a control-plane CA that the bundle never declared")
 	}
+}
+
+// The order the console-driven journey needs: enrol first, configure from the console, test
+// after. A bundle that describes no database has nothing to test and no roles.sql to confirm,
+// and an installer that insisted on both would make the console's own step 3 unreachable.
+func TestInstallEnrolsASourceTheConsoleHasNotConfiguredYet(t *testing.T) {
+	bundle := pendingBundleForTest(t)
+	root := t.TempDir()
+	var output strings.Builder
+
+	err := Run(context.Background(), Options{
+		Bundle: bundle, Root: root, SkipLiveChecks: true, Version: "test",
+		Inputs: Inputs{Token: "rtc_one_time_value"},
+		Prompts: Prompts{Confirm: func(string) (bool, error) {
+			t.Fatal("install asked to confirm SQL that cannot exist yet")
+			return false, nil
+		}},
+		Out: &output,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertFile(t, rooted(root, "/etc/retentionops/connector.yaml"), 0o640)
+	// No password either: nobody has named the role it belongs to. `secret set` writes it once
+	// the console has, and the console waits for a signed test rather than for a claim.
+	if _, statErr := os.Stat(rooted(root, "/etc/retentionops/secrets/reader-password")); !os.IsNotExist(statErr) {
+		t.Fatal("install demanded a password for a role nobody has chosen")
+	}
+	if strings.Contains(output.String(), "roles.sql") {
+		t.Fatalf("install pointed at SQL that was never rendered:\n%s", output.String())
+	}
+	if !strings.Contains(output.String(), "configured from the RetentionOps console") {
+		t.Fatalf("install did not say where the configuration comes from:\n%s", output.String())
+	}
+}
+
+// No certificate is a complete answer: the connector then verifies the database against the roots
+// this host already trusts, which is how every other TLS client on it works.
+func TestInstallAcceptsABundleThatNamesNoDatabaseCertificate(t *testing.T) {
+	bundle := pendingBundleForTest(t)
+	root := t.TempDir()
+
+	if err := Run(context.Background(), Options{
+		Bundle: bundle, Root: root, SkipLiveChecks: true, Version: "test",
+		Inputs: Inputs{Token: "rtc_one_time_value"}, Out: io.Discard,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(rooted(root, "/etc/retentionops/certs/postgres-ca.pem")); !os.IsNotExist(err) {
+		t.Fatal("a certificate nobody supplied was installed")
+	}
+	if strings.Contains(read(t, rooted(root, "/etc/retentionops/connector.yaml")), "postgres-ca.pem") {
+		t.Fatal("the configuration pins a certificate that does not exist")
+	}
+}
+
+func pendingBundleForTest(t *testing.T) string {
+	t.Helper()
+	bundle := filepath.Join(t.TempDir(), "bundle")
+	if err := initializer.Generate(initializer.Answers{
+		Version: initializer.AnswersVersion, Platform: initializer.PlatformSystemd,
+		OutputDirectory: bundle, OrganizationID: testOrganization, SourceID: testSource,
+		ControlPlane: initializer.ControlPlane{URL: "https://connector.retentionops.example"},
+		Source: initializer.Source{
+			Reader: config.Credential{Password: config.SecretRef{
+				Provider: "file", Ref: "/etc/retentionops/secrets/reader-password",
+			}},
+			AllowedSchemas: []string{"public"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return bundle
 }

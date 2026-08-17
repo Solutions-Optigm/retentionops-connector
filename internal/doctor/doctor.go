@@ -139,6 +139,14 @@ func checkControlPlane(ctx context.Context, report *Report, configuration *confi
 func checkSource(ctx context.Context, report *Report, id string, source *config.Source, registry *secrets.Registry) {
 	label := "Source " + id[:8]
 
+	// Nothing to dial, and that is not a fault: this source is waiting for a configuration from
+	// the console. Reporting it as unreachable would fail an installation that is exactly where
+	// it should be, right after enrolment.
+	if source.Pending() {
+		report.add(label, Skip, "awaiting its configuration from RetentionOps")
+		return
+	}
+
 	address := net.JoinHostPort(source.Host, strconv.Itoa(source.Port))
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	connection, err := dialer.DialContext(ctx, "tcp", address)

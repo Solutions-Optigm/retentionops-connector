@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/solutions-optigm/retentionops-connector/adapters/postgres"
@@ -151,29 +150,24 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 	}{
 		{label: "Output directory", defaultValue: defaultString(initial.OutputDirectory, defaultOutputDirectory()), assign: func(value string) error { initial.OutputDirectory = value; return nil }},
 		{label: "Organization UUID", defaultValue: initial.OrganizationID, assign: func(value string) error { initial.OrganizationID = value; return nil }},
-		{label: "PostgreSQL host", defaultValue: initial.Source.Host, assign: func(value string) error { initial.Source.Host = value; return nil }},
-		{label: "PostgreSQL port", defaultValue: defaultString(strconv.Itoa(initial.Source.Port), "5432"), assign: func(value string) error {
-			port, err := strconv.Atoi(value)
-			if err != nil {
-				return fmt.Errorf("port must be an integer")
-			}
-			initial.Source.Port = port
-			return nil
-		}},
-		{label: "Database", defaultValue: initial.Source.Database, assign: func(value string) error { initial.Source.Database = value; return nil }},
 		{
-			label: "PostgreSQL CA certificate (source path)",
-			// An operator who does not already know this answer cannot invent it, and pressing
-			// Enter used to be accepted here — the refusal arrived at `install`, one step and
-			// often one machine later, phrased as a missing bundle input. The question now
-			// carries what it is, where it usually already exists, and why it cannot be skipped.
-			help: postgresCAHelp,
-			// Offered, never assumed: the discovered path is shown as the default and can be
-			// replaced. Guessing silently would point verify-full at the wrong authority.
-			defaultValue: defaultString(initial.Source.TLSCASourceFile, discoverPostgresCA()),
+			label: "PostgreSQL CA certificate (source path, blank for this host's trust store)",
+			// Where the database is, which database it is and as which roles are no longer asked
+			// here: the console sends them, sealed to this connector (ADR-034), and asking twice
+			// only produced two answers to reconcile. What remains is a path on this machine,
+			// which no console can know.
+			//
+			// Blank is now an answer rather than a refusal. It means "verify against the roots
+			// this host already trusts", which is correct for a publicly trusted certificate and
+			// for a private CA an administrator installed system-wide. Verification still happens
+			// either way — the alternative was an operator inventing a path, or dropping to a TLS
+			// mode that verifies nothing to get past the question.
+			help:         postgresCAHelp,
+			defaultValue: initial.Source.TLSCASourceFile,
 			assign: func(value string) error {
 				if value == "" {
-					return errors.New("required — the connector verifies your database against this certificate before it will hold delete rights on it")
+					initial.Source.TLSCASourceFile = ""
+					return nil
 				}
 				if _, err := os.Stat(value); err != nil {
 					// Not an error: a bundle is often prepared by whoever owns the certificate and
@@ -206,7 +200,6 @@ func Interactive(in io.Reader, out io.Writer, initial Answers) (Answers, error) 
 				return nil
 			},
 		},
-		{label: "Reader role", defaultValue: defaultString(initial.Source.Reader.Username, "retentionops_reader"), assign: func(value string) error { initial.Source.Reader.Username = value; return nil }},
 		{label: "Reader secret provider", defaultValue: defaultString(initial.Source.Reader.Password.Provider, "file"), assign: func(value string) error { initial.Source.Reader.Password.Provider = value; return nil }},
 		{label: "Reader secret reference", defaultValue: defaultString(initial.Source.Reader.Password.Ref, "/etc/retentionops/secrets/reader-password"), assign: func(value string) error { initial.Source.Reader.Password.Ref = value; return nil }},
 		{label: "Allowed schemas (comma separated)", defaultValue: strings.Join(initial.Source.AllowedSchemas, ","), assign: func(value string) error {
@@ -260,11 +253,14 @@ does not, typically a self-hosted or local deployment: the certificate is copied
 bundle, so the connector carries its own trust instead of depending on what the host's trust
 store happens to contain.`
 
-const postgresCAHelp = `The CA certificate that signed your PostgreSQL server's TLS certificate — a path on this
-machine. The connector verifies the server against it on every connection, because it holds
-delete rights on your data and an unverified connection is one somebody can stand in the
-middle of. Usually already present as ssl_ca_file in postgresql.conf, as ~/.postgresql/root.crt,
-or as /etc/ssl/certs/ca-certificates.crt if the server uses a publicly trusted certificate.`
+const postgresCAHelp = `Leave blank unless your PostgreSQL server presents a privately signed certificate that this
+host does not already trust. The connector verifies the server on every connection either way,
+because it holds delete rights on your data and an unverified connection is one somebody can
+stand in the middle of; blank simply means it verifies against this host's own trust store.
+Supply a path when the certificate is self-signed or signed by an internal authority — usually
+ssl_ca_file in postgresql.conf, ~/.postgresql/root.crt, or the file your DBA gave you. The
+certificate is copied into the bundle, so the connector carries its own trust rather than
+depending on what the host's store happens to contain.`
 
 // discoverPostgresCA returns the first conventional location that exists, most specific first.
 // The system bundle is last: it is the right answer only for a publicly trusted server
@@ -320,7 +316,11 @@ func splitSchemas(value string) []string {
 // never overwritten: rerunning init may update generated configuration, but cannot erase a
 // secret an operator has already installed.
 func Generate(answers Answers) error {
-	if answers.Source.TLSCAFile == "" {
+	// Only when a certificate was supplied, exactly like the control-plane CA below. An empty
+	// runtime path is what tells the connector to verify against the host's roots; defaulting it
+	// to a file nobody produced turned "this host already trusts your database" into a missing
+	// file at install time.
+	if answers.Source.TLSCASourceFile != "" && answers.Source.TLSCAFile == "" {
 		answers.Source.TLSCAFile = "/etc/retentionops/certs/postgres-ca.pem"
 	}
 	// Only when a certificate was supplied: an empty runtime path is what tells the connector to
@@ -358,13 +358,18 @@ func Generate(answers Answers) error {
 	}
 	artifacts := map[string][]byte{
 		"connector.yaml": configurationYAML,
-		"roles.sql": []byte(postgres.RenderRolesSQL(
+		"NEXT-STEPS.txt": []byte(renderNextSteps(answers)),
+	}
+	// roles.sql needs the database name and the role names, which the console now supplies. It is
+	// rendered by `retentionops-connector source roles` once the configuration has arrived — the
+	// first moment both are known, and the moment the DBA actually needs it.
+	if !configuration.Sources[answers.SourceID].Pending() {
+		artifacts["roles.sql"] = []byte(postgres.RenderRolesSQL(
 			answers.Source.Database,
 			answers.Source.Reader,
 			answers.Source.Executor,
 			answers.Source.AllowedSchemas,
-		)),
-		"NEXT-STEPS.txt": []byte(renderNextSteps(answers)),
+		))
 	}
 	if answers.Platform == PlatformSystemd {
 		artifacts["retentionops-connector.service"] = []byte(systemdUnit)
@@ -538,6 +543,15 @@ func prepareOutputDirectory(output string) error {
 	return writeFile(filepath.Join(output, bundleMarker), []byte("retentionops connector init bundle v2\n"), 0o600)
 }
 
+// configuredBy records who described the database, which is what decides how strictly the
+// generated file is validated and whether the source starts out pending.
+func configuredBy(answers Answers) string {
+	if answers.Source.Host == "" || answers.Source.Database == "" {
+		return config.ConfiguredByRetentionOps
+	}
+	return config.ConfiguredByLocal
+}
+
 func buildConfig(answers Answers) (*config.Config, error) {
 	configuration := &config.Config{
 		ControlPlane: config.ControlPlane{
@@ -550,7 +564,15 @@ func buildConfig(answers Answers) (*config.Config, error) {
 		Sources: map[string]*config.Source{
 			answers.SourceID: {
 				Type: "postgresql", Mode: config.SourceModeDiscoveryOnly,
-				Host: answers.Source.Host, Port: answers.Source.Port,
+				// Who describes this database. Interactive initialization no longer asks, so the
+				// console does it through a sealed configuration; an answers file that names a
+				// host keeps describing it locally and is validated as strictly as before.
+				//
+				// Either way the operator's file remains the only authority on which databases
+				// exist — an overlay naming a source absent from this map is refused — and on
+				// what may be deleted there.
+				ConfiguredBy: configuredBy(answers),
+				Host:         answers.Source.Host, Port: answers.Source.Port,
 				Database: answers.Source.Database,
 				TLS:      config.TLS{Mode: config.TLSVerifyFull, CAFile: answers.Source.TLSCAFile},
 				Reader:   answers.Source.Reader,
@@ -590,6 +612,27 @@ func renderNextSteps(answers Answers) string {
 	activation := "sudo systemctl enable --now retentionops-connector"
 	if answers.Platform == PlatformCompose {
 		activation = `docker compose -f "$PWD/compose.yaml" up -d`
+	}
+	if answers.Source.Host == "" || answers.Source.Database == "" {
+		return fmt.Sprintf(`RetentionOps connector — reviewed local installation
+
+init did not execute SQL, create a secret, contact RetentionOps, install a service or start one.
+The generated source is discovery-only: no executor credential and no DELETE grant exist, and it
+carries no database address — the console sends that, sealed to this connector.
+
+1. Review connector.yaml and bundle.json.
+2. Enter this bundle directory and run the resumable local assistant:
+   sudo retentionops-connector install --bundle "$PWD"
+3. After the assistant reports every check green, perform its one explicit activation command:
+   %s
+4. Configure the database from the RetentionOps console, then finish here:
+   sudo -u retentionops retentionops-connector source roles %s | psql -h HOST -U postgres -d DATABASE
+   sudo retentionops-connector secret set --role reader
+
+The roles script is rendered once the console has named the database and the roles, which is the
+first moment it can name what your DBA is being asked to create. Nothing above emits a password,
+a token or a command containing a secret.
+`, activation, answers.SourceID)
 	}
 	return fmt.Sprintf(`RetentionOps connector — reviewed local installation
 
@@ -654,6 +697,13 @@ func renderCompose(answers Answers) string {
 	if answers.ControlPlane.CAFile != "" {
 		controlPlaneCA = fmt.Sprintf("\n      - ./runtime/certs/control-plane-ca.pem:%s:ro", answers.ControlPlane.CAFile)
 	}
+	// Same reasoning for the database's certificate, which is now optional: verifying against the
+	// image's own roots is a complete answer, and a mount naming an empty path is not YAML Docker
+	// will accept at all.
+	postgresCA := ""
+	if answers.Source.TLSCAFile != "" {
+		postgresCA = fmt.Sprintf("\n      - ./runtime/certs/postgres-ca.pem:%s:ro", answers.Source.TLSCAFile)
+	}
 	return fmt.Sprintf(`services:
   connector:
     image: %s@sha256:REPLACE_WITH_VERIFIED_DIGEST
@@ -664,8 +714,7 @@ func renderCompose(answers Answers) string {
     cap_drop: ["ALL"]
     security_opt: ["no-new-privileges:true"]
     volumes:
-      - ./connector.yaml:%s:ro
-      - ./runtime/certs/postgres-ca.pem:%s:ro%s
+      - ./connector.yaml:%s:ro%s%s
       - ./runtime/secrets/reader-password:%s:ro
       - ./runtime/identity:/var/lib/retentionops/identity
       - ./runtime/state:/var/lib/retentionops/state
@@ -675,7 +724,7 @@ networks:
   egress:
   database:
     external: true
-`, imageRepository, runtimeConfigPath, runtimeConfigPath, answers.Source.TLSCAFile, controlPlaneCA, answers.Source.Reader.Password.Ref)
+`, imageRepository, runtimeConfigPath, runtimeConfigPath, postgresCA, controlPlaneCA, answers.Source.Reader.Password.Ref)
 }
 
 // ValidateControlPlaneFlag provides a fast error before prompting while Config.Validate remains

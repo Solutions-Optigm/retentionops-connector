@@ -116,6 +116,61 @@ func Run(ctx context.Context, options Options) error {
 		return err
 	}
 
+	// A source the console configures has no database name yet, so there is no SQL to hand a DBA
+	// and nothing to confirm. The roles are created after the configuration arrives, from
+	// `retentionops-connector source roles`, which can finally name them. Asking here would be
+	// asking somebody to confirm they ran a script that does not exist.
+	pending := isPending(configuration, manifest.SourceID)
+	if pending {
+		fmt.Fprintf(options.Out, "\nThis connector is configured from the RetentionOps console. "+
+			"Enrol now; the database, its roles and the connection test all follow from there.\n")
+	} else {
+		if err := confirmDatabaseRole(options, manifest, bundle, state, complete); err != nil {
+			return err
+		}
+	}
+
+	runtimeConfiguration, secretPath, identityDirectory, err := runtimeView(options, manifest, bundle, configuration)
+	if err != nil {
+		return err
+	}
+	if err := ensureReaderSecret(options, secretPath, pending); err != nil {
+		return err
+	}
+	if manifest.Platform == initializer.PlatformSystemd {
+		if err := protectSystemdOwnership(options.Root, manifest, secretPath); err != nil {
+			return err
+		}
+	}
+	if manifest.Platform == initializer.PlatformCompose {
+		if err := protectComposeOwnership(bundle); err != nil {
+			return err
+		}
+	}
+	if err := complete("reader-secret-installed"); err != nil {
+		return err
+	}
+
+	// Nothing to test against until the console has said where the database is. The test is not
+	// skipped so much as moved: it is the console's step 5, run by this same connector, and its
+	// result is signed rather than printed here.
+	if !options.SkipLiveChecks && !pending {
+		if err := checkSource(ctx, runtimeConfiguration, manifest.SourceID); err != nil {
+			return err
+		}
+		if err := complete("source-validated"); err != nil {
+			return err
+		}
+	}
+	return finishInstall(ctx, options, manifest, bundle, state, complete, runtimeConfiguration, identityDirectory)
+}
+
+func isPending(configuration *config.Config, sourceID string) bool {
+	source, known := configuration.Source(sourceID)
+	return known && source.Pending()
+}
+
+func confirmDatabaseRole(options Options, manifest initializer.BundleManifest, bundle string, state *installState, complete func(string) error) error {
 	dbaCommand := databaseCommand(manifest, filepath.Join(bundle, "roles.sql"))
 	fmt.Fprintf(options.Out, "\nApply the reviewed reader-role SQL as a PostgreSQL administrator:\n  %s\n", dbaCommand)
 	if !contains(state.Completed, "database-role-confirmed") {
@@ -142,37 +197,24 @@ func Run(ctx context.Context, options Options) error {
 			}
 		}
 	}
+	return nil
+}
 
-	runtimeConfiguration, secretPath, identityDirectory, err := runtimeView(options, manifest, bundle, configuration)
-	if err != nil {
-		return err
-	}
-	if err := ensureReaderSecret(options, secretPath); err != nil {
-		return err
-	}
-	if manifest.Platform == initializer.PlatformSystemd {
-		if err := protectSystemdOwnership(options.Root, manifest, secretPath); err != nil {
-			return err
-		}
-	}
-	if manifest.Platform == initializer.PlatformCompose {
-		if err := protectComposeOwnership(bundle); err != nil {
-			return err
-		}
-	}
-	if err := complete("reader-secret-installed"); err != nil {
-		return err
-	}
-
-	if !options.SkipLiveChecks {
-		if err := checkSource(ctx, runtimeConfiguration, manifest.SourceID); err != nil {
-			return err
-		}
-		if err := complete("source-validated"); err != nil {
-			return err
-		}
-	}
-
+// finishInstall enrols the connector and verifies the installation it can verify.
+//
+// Split out because the steps before it now differ: a source the console configures has no
+// database to test and no roles to confirm, while everything from here on — identity, enrolment,
+// doctor, activation — is the same either way.
+func finishInstall(
+	ctx context.Context,
+	options Options,
+	manifest initializer.BundleManifest,
+	bundle string,
+	state *installState,
+	complete func(string) error,
+	runtimeConfiguration *config.Config,
+	identityDirectory string,
+) error {
 	organization := manifest.OrganizationID
 	if organization == "" {
 		organization = options.Inputs.Organization
@@ -196,10 +238,11 @@ func Run(ctx context.Context, options Options) error {
 			if options.NonInteractive || options.Prompts.Token == nil {
 				return errors.New("install: enrollment token is required through --token-file")
 			}
-			token, err = options.Prompts.Token()
+			prompted, err := options.Prompts.Token()
 			if err != nil {
 				return err
 			}
+			token = prompted
 		}
 		if token == "" {
 			return errors.New("install: enrollment token is empty")
@@ -277,13 +320,19 @@ func prepareRuntime(options Options, manifest initializer.BundleManifest, bundle
 		if options.Inputs.CASourceFile != "" {
 			caSource = options.Inputs.CASourceFile
 		}
-		caTarget := rooted(options.Root, manifest.PostgreSQL.CARuntimeFile)
-		if caSource == "" {
-			if _, err := os.Stat(caTarget); err != nil {
-				return errors.New("install: PostgreSQL CA source is absent from this bundle; provide --ca-file")
+		// No certificate is a complete answer: the connector then verifies the database against
+		// this host's own trust store, which is how every other TLS client here works. A bundle
+		// that names one must still produce it, or `verify-full` would silently fall back to
+		// different roots than the operator chose.
+		if manifest.PostgreSQL.CARuntimeFile != "" {
+			caTarget := rooted(options.Root, manifest.PostgreSQL.CARuntimeFile)
+			if caSource == "" {
+				if _, err := os.Stat(caTarget); err != nil {
+					return errors.New("install: this bundle expects a PostgreSQL CA; provide --ca-file")
+				}
+			} else if err := validateAndInstallCA(caSource, caTarget, options.Repair); err != nil {
+				return err
 			}
-		} else if err := validateAndInstallCA(caSource, caTarget, options.Repair); err != nil {
-			return err
 		}
 		if err := installControlPlaneCA(manifest, options.Root, options.Repair); err != nil {
 			return err
@@ -304,11 +353,13 @@ func prepareRuntime(options Options, manifest initializer.BundleManifest, bundle
 	if options.Inputs.CASourceFile != "" {
 		caSource = options.Inputs.CASourceFile
 	}
-	if caSource == "" {
-		return errors.New("install: PostgreSQL CA source is absent from this bundle; provide --ca-file")
+	if caSource == "" && manifest.PostgreSQL.CARuntimeFile != "" {
+		return errors.New("install: this bundle expects a PostgreSQL CA; provide --ca-file")
 	}
-	if err := validateAndInstallCA(caSource, filepath.Join(bundle, "runtime/certs/postgres-ca.pem"), options.Repair); err != nil {
-		return err
+	if caSource != "" {
+		if err := validateAndInstallCA(caSource, filepath.Join(bundle, "runtime/certs/postgres-ca.pem"), options.Repair); err != nil {
+			return err
+		}
 	}
 	// compose.yaml mounts this path from the bundle, so it lands beside the PostgreSQL CA rather
 	// than at the absolute runtime path the container will see.
@@ -379,21 +430,28 @@ func runtimeView(options Options, manifest initializer.BundleManifest, bundle st
 	}
 	if manifest.Platform == initializer.PlatformSystemd {
 		if options.Root != "/" {
-			source.TLS.CAFile = rooted(options.Root, source.TLS.CAFile)
+			if source.TLS.CAFile != "" {
+				source.TLS.CAFile = rooted(options.Root, source.TLS.CAFile)
+			}
 			source.Reader.Password.Ref = rooted(options.Root, source.Reader.Password.Ref)
 			configuration.Identity.Directory = rooted(options.Root, configuration.Identity.Directory)
 			configuration.State.Directory = rooted(options.Root, configuration.State.Directory)
 		}
 		return configuration, source.Reader.Password.Ref, configuration.Identity.Directory, nil
 	}
-	source.TLS.CAFile = filepath.Join(bundle, "runtime/certs/postgres-ca.pem")
+	// Left empty when the bundle carries no certificate: the container then verifies against the
+	// roots in the image, and pointing at a file that was never installed would fail every
+	// connection with a message about a missing path rather than about trust.
+	if source.TLS.CAFile != "" {
+		source.TLS.CAFile = filepath.Join(bundle, "runtime/certs/postgres-ca.pem")
+	}
 	source.Reader.Password.Ref = filepath.Join(bundle, "runtime/secrets/reader-password")
 	configuration.Identity.Directory = filepath.Join(bundle, "runtime/identity")
 	configuration.State.Directory = filepath.Join(bundle, "runtime/state")
 	return configuration, source.Reader.Password.Ref, configuration.Identity.Directory, nil
 }
 
-func ensureReaderSecret(options Options, target string) error {
+func ensureReaderSecret(options Options, target string, optional bool) error {
 	if existing, err := os.ReadFile(target); err == nil && len(bytes.TrimSpace(existing)) > 0 { //nolint:gosec // local credential target
 		if info, statErr := os.Stat(target); statErr != nil || info.Mode().Perm()&0o044 != 0 {
 			return fmt.Errorf("install: existing reader secret is not private")
@@ -401,6 +459,12 @@ func ensureReaderSecret(options Options, target string) error {
 		return nil
 	}
 	secret := bytes.TrimRight(options.Inputs.ReaderSecret, "\r\n")
+	if len(secret) == 0 && optional {
+		// Nobody has named the role this password belongs to yet, so demanding it here would be
+		// asking for the password of a role the operator has not chosen. `secret set` writes it
+		// after the console does, and the console waits for a signed test rather than a promise.
+		return nil
+	}
 	if len(secret) == 0 {
 		if options.NonInteractive || options.Prompts.Secret == nil {
 			return errors.New("install: reader secret is required through --reader-secret-file")
