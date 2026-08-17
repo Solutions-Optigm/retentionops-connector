@@ -667,15 +667,44 @@ func protectSystemdOwnership(root string, manifest initializer.BundleManifest, s
 	if err != nil {
 		return err
 	}
-	for _, path := range []string{"/etc/retentionops", "/etc/retentionops/certs", "/etc/retentionops/secrets", manifest.RuntimeConfig, manifest.PostgreSQL.CARuntimeFile} {
+	for _, path := range serviceReadablePaths(manifest) {
 		if err := os.Chown(path, 0, gid); err != nil {
 			return fmt.Errorf("install: own %s: %w", path, err)
 		}
+	}
+	// The password is written later, by `secret set`, for a source the console configures: there
+	// is no role to name one for yet. That command applies the same owner and mode, so nothing
+	// here has to anticipate a file that does not exist.
+	if _, err := os.Stat(secretPath); errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
 	if err := os.Chown(secretPath, uid, gid); err != nil {
 		return fmt.Errorf("install: own %s: %w", secretPath, err)
 	}
 	return os.Chmod(secretPath, 0o400)
+}
+
+// serviceReadablePaths lists what the service account must be able to read, skipping what this
+// bundle does not have.
+//
+// A bundle that names no database certificate leaves that path empty, and `os.Chown("")` fails
+// with a message about a file called nothing — which is exactly the failure it produced: the
+// installation stopped after enrolling nothing, naming no cause an operator could act on.
+func serviceReadablePaths(manifest initializer.BundleManifest) []string {
+	candidates := []string{
+		"/etc/retentionops",
+		"/etc/retentionops/certs",
+		"/etc/retentionops/secrets",
+		manifest.RuntimeConfig,
+		manifest.PostgreSQL.CARuntimeFile,
+	}
+	paths := make([]string, 0, len(candidates))
+	for _, path := range candidates {
+		if path != "" {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func protectSystemdIdentity(root, directory string) error {
